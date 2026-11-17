@@ -18,7 +18,7 @@ jobs:
           node-version: ${{ matrix.node }}
       - name: Run offline regression suite
         run: npm test
-deploy:
+  deploy:
     name: Deploy Apps Script
     needs: test
     if: vars.ENABLE_APPS_SCRIPT_DEPLOY == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
