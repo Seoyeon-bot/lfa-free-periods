@@ -1,0 +1,10 @@
+node_modules/
+.DS_Store
+.clasprc.json
+.clasp.json
+.env
+.env.*
+coverage/
+client_secret*.json
+credentials*.json
+test-output/

@@ -1,0 +1,804 @@
+/*
+LFA FREE PERIODS — BLACK / ORANGE / WHITE
+Replace ALL Code.gs with this file. Keep Google Calendar API enabled.
+Deploy > Manage deployments > Edit > New version > Deploy.
+Execute as User accessing the web app; restrict access to LFA organization.
+Open the same /exec URL and click Add/Update my free periods once.
+
+Fixes Calendars.get Not Found diagnostics and stale output recovery:
+- Main calendar resolved from CalendarList.primary, avoiding primary metadata get.
+- School calendar uses configured ID, or one exact All LFA Events name match.
+- Source read failures name the affected calendar and do not change output events.
+- Unavailable saved free-period output is replaced; its prior ID is retained.
+- A 403 or non-404 error does not trigger output replacement.
+- Missing calendar-list entries are registered without duplicating the calendar.
+
+Reads All LFA Events, main calendar, and other checked/non-hidden calendars.
+Shared calendar bookings all block time. Free-period outputs are excluded.
+Event-change watches where permitted plus a one-minute fallback; Google timing
+and quotas apply. Busy-only visible calendars are read in consecutive 28-day requests to avoid
+the free/busy endpoint time-range error while retaining August-May coverage.
+A-G day markers are read per actual date for the full August-May academic year.
+Missing letter-day dates are skipped. January uses the August of the previous year;
+June/July prepare the upcoming school year. Fill is batched at 100 mutations per run,
+prioritizing removal of booked periods and upcoming dates. Review bell times annually.
+Special bell dates still need explicit overrides. No planner PDF upload.
+Page colors: black, orange, white. Calendar entries remain light gray #E6E6E6.
+Locally tested with Calendar API mocks; live deployment is not verified here.
+*/
+
+/** Deploy as USER ACCESSING the web app; restrict access to LFA domain. */
+const SCHOOL = {
+  schoolCalendarId: 'c_a9d5ef06f53dfbf186ad78027c1432d2c21ae9c09815c0ee316854dc2193f15d@group.calendar.google.com',
+  allowedDomain: 'lfanet.org',
+  adminEmails: ['seoyeon.choi@lfanet.org'],
+  lightGray: '#E6E6E6',
+  timezone: 'America/Chicago',
+  maxMutationsPerRun: 100,
+  maxRunMilliseconds: 180000,
+  refreshMinutes: 1,
+  nearbyDays: 35,
+  fullCheckMinutes: 360,
+  scanChunkDays: 35,
+  developerEmail: 'seoyeonchoi2001@gmail.com',
+  // Reuse indefinitely. Review these times against each year's planner.
+  bellTimes: {
+    normalMorning: [['08:10','08:55'],['08:55','09:40'],['10:00','10:45'],['10:45','11:30'],['11:30','12:15'],['12:15','13:00']],
+    lateMorning: [['08:40','09:25'],['09:25','10:10'],['10:30','11:15'],['11:15','12:00'],['12:00','12:45'],['12:45','13:30']],
+    normalAfternoon: [['13:30','14:15'],['14:15','15:00']],
+    tuesdayAfternoon: [['13:00','13:45'],['13:45','14:30']],
+    asmAfternoon: [['13:45','14:30'],['14:30','15:15']]
+  },
+  // Date overrides: null = no classes; otherwise explicit [start,end] pairs,
+  // numbered from period 1. Use these for exam / assembly / special schedules.
+  overrides: {
+    // 'YYYY-MM-DD': null, // no classes on that date
+  },
+  // F Tuesdays with ASM: add dates here if ASM is not a timed school event.
+  fTuesdayAsmDates: [],
+  noSchoolPattern: /\b(no (?:school|classes)|school closed|snow day|thanksgiving break|winter break|spring break)\b/i,
+  specialSchedulePattern: /\b(special schedule|modified schedule|exam schedule|exam day|early dismissal)\b/i,
+  absencePattern: /\b(out of office|ooo|sick leave|personal leave|vacation)\b/i
+};
+const MARKER = 'LFA_FREE_PERIODS_V1';
+
+function doGet() {
+  identity_();
+  return HtmlService.createHtmlOutput(WEB_HTML)
+    .setTitle('LFA · Free Periods')
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+}
+
+function identity_() {
+  const email = Session.getEffectiveUser().getEmail().toLowerCase();
+  const active = Session.getActiveUser().getEmail().toLowerCase();
+  if (!email.endsWith('@' + SCHOOL.allowedDomain))
+    throw new Error('Please sign in with your LFA Google account.');
+  // Reject a deployment running as its owner on another visitor's behalf.
+  if (!active || active !== email)
+    throw new Error('Deployment must execute as User accessing the web app.');
+  return email;
+}
+
+function calendarList_() {
+  let all=[],token;
+  do {
+    const page=Calendar.CalendarList.list({maxResults:250,showHidden:true,pageToken:token});
+    all=all.concat(page.items || []);token=page.nextPageToken;
+  } while(token);
+  return all.filter(c=>!c.deleted);
+}
+function schoolId_(all) {
+  all=all || calendarList_();
+  if(all.some(c=>c.id===SCHOOL.schoolCalendarId)) return SCHOOL.schoolCalendarId;
+  const matches=all.filter(c=>[c.summary,c.summaryOverride].some(name=>
+    (name || '').trim().toLowerCase()==='all lfa events'));
+  if(matches.length===1) return matches[0].id;
+  if(matches.length>1) throw new Error('More than one All LFA Events calendar was found. Set the correct schoolCalendarId in the code.');
+  return SCHOOL.schoolCalendarId;
+}
+// Subscribe to the existing shared calendar; never copy its events or change
+// its sharing permissions. Calendar ID, not a personal display name, is used.
+function ensureSchoolSubscribed_() {
+  const id=SCHOOL.schoolCalendarId;
+  let entry;
+  try {
+    entry=Calendar.CalendarList.get(id);
+  } catch(error) {
+    if(!notFound_(error)) throw new Error('Cannot access the LFA letter-day calendar. Ask its owner to share it with your LFA account.');
+    try {
+      entry=Calendar.CalendarList.insert({id:id,selected:true,hidden:false});
+    } catch(insertError) {
+      if(/\b409\b|already exists|duplicate/i.test(String(insertError.message || insertError)))
+        entry=Calendar.CalendarList.get(id);
+      else throw new Error('Could not add the LFA letter-day calendar. Ask its owner to share it with your LFA account, then try again.');
+    }
+  }
+  if(!['reader','writer','owner'].includes(entry.accessRole))
+    throw new Error('The LFA letter-day calendar must be shared with permission to see event details. Busy-only access cannot identify letter days.');
+  if(entry.selected!==true || entry.hidden===true)
+    Calendar.CalendarList.patch({selected:true,hidden:false},id);
+  return id;
+}
+
+function sources_() {
+  const p=PropertiesService.getUserProperties(),output=p.getProperty('OUTPUT_CALENDAR_ID');
+  const all=calendarList_(),school=schoolId_(all),primary=all.find(c=>c.primary);
+  if(!primary) throw new Error('Your main Google Calendar is unavailable. Sign in with your LFA account and check Calendar access.');
+  const visible=all.filter(c=>!c.hidden && c.selected===true && c.id!==output && c.id!==school &&
+    !/^(LFA Free Periods|Free[- ]Break[- ]Periods?)$/i.test(c.summary || ''));
+  const roles=['reader','writer','owner','freeBusyReader'];
+  if(visible.some(c=>!roles.includes(c.accessRole)))
+    throw new Error('A checked calendar cannot be read. Review its sharing permissions.');
+  const result=new Map([[primary.id,primary]]);
+  visible.forEach(c=>result.set(c.id,c));result.delete(output);result.delete(school);
+  return [...result.values()];
+}
+
+function getSetup() {
+  const email=identity_(),p=PropertiesService.getUserProperties();
+  const output=p.getProperty('OUTPUT_CALENDAR_ID');
+  return {email:email,enabled:p.getProperty('ENABLED')==='yes',
+    lastSync:p.getProperty('LAST_SYNC'),lastError:p.getProperty('LAST_ERROR'),
+    issue:p.getProperty('LAST_ISSUE') ? JSON.parse(p.getProperty('LAST_ISSUE')) : null,
+    lastStatus:p.getProperty('LAST_STATUS'),notificationError:p.getProperty('NOTIFICATION_ERROR'),
+    diagnostics:p.getProperty('LAST_DIAGNOSTICS'),stage:p.getProperty('SYNC_STAGE'),
+    calendarUrl:output ? calendarUrl_(output) : null};
+}
+
+function activate(email) {
+  const actual=identity_();
+  if(typeof email!=='string' || email.trim().toLowerCase()!==actual)
+    throw new Error('Use the email of your signed-in LFA Google account.');
+  developerAlert_('started','Setup requested');
+  try {return activate_(email);}
+  catch(error) {developerAlert_('failed','Activation / initial update',error);throw error;}
+}
+
+function activate_(email) {
+  const actual=identity_();
+  if(typeof email!=='string' || email.trim().toLowerCase()!==actual)
+    throw new Error('Use the email of your signed-in LFA Google account.');
+  ensureSchoolSubscribed_();
+  const p=PropertiesService.getUserProperties(),outputId=p.getProperty('OUTPUT_CALENDAR_ID');
+  const sources=sources_();
+  const schoolId=schoolId_();
+  const start=new Date(),end=new Date(+start+86400000);
+  readCalendar_(schoolId,start,end,'All LFA Events');
+  sources.forEach(source=>sourceEvents_(source,start,end));
+  const lock = LockService.getUserLock();
+  if (!lock.tryLock(1000)) return busyResponse_();
+  try {
+    p.setProperty('ACCOUNT_EMAIL', actual);
+    const output=outputCalendar_();
+    color_(output);
+    installTriggers_([schoolId_()].concat(sources.map(c=>c.id)));
+    p.setProperty('ENABLED', 'yes');
+  } finally { lock.releaseLock(); }
+  return refreshNow();
+}
+
+function refreshNow() {
+  identity_();
+  let result;
+  try {result=syncFreePeriods();}
+  catch(error) {
+    const issue=classifyFailure_(error);
+    return {message:issue.message,needsAttention:!issue.retryable,retrying:issue.retryable,
+      calendarUrl:calendarUrl_(PropertiesService.getUserProperties().getProperty('OUTPUT_CALENDAR_ID'))};
+  }
+  return {message: result.message, calendarUrl: calendarUrl_(PropertiesService.getUserProperties().getProperty('OUTPUT_CALENDAR_ID')),
+    skipped: result.skipped || [], lastSync:result.lastSync,busy:!!result.busy,diagnostics:result.diagnostics};
+}
+
+function pauseUpdates() {
+  identity_();
+  const lock = LockService.getUserLock();
+  if (!lock.tryLock(1000)) return busyResponse_();
+  try {
+    PropertiesService.getUserProperties().setProperty('ENABLED', 'no');
+    ScriptApp.getProjectTriggers().filter(t => ['syncFreePeriods','calendarChanged'].includes(t.getHandlerFunction()))
+      .forEach(t => ScriptApp.deleteTrigger(t));
+  } finally { lock.releaseLock(); }
+  return {message: 'Automatic updates paused. Existing entries remain in your calendar.'};
+}
+
+function syncFreePeriods() {
+  const startedAt=Date.now();
+  const p=PropertiesService.getUserProperties();
+  if(p.getProperty('ENABLED')!=='yes') return {message:'Updates are paused.'};
+  const email=Session.getEffectiveUser().getEmail().toLowerCase();
+  if(email!==p.getProperty('ACCOUNT_EMAIL')) throw new Error('Account mismatch. Open the website again.');
+  const lock=LockService.getUserLock();
+  if(!lock.tryLock(1000)) return busyResponse_();
+  let stage='Preparing calendars';
+  try {
+    const retryAfter=Number(p.getProperty('NEXT_SYNC_AFTER') || 0);
+    if(retryAfter>Date.now()) {
+      const savedIssue=p.getProperty('LAST_ISSUE') ? JSON.parse(p.getProperty('LAST_ISSUE')) : null;
+      return {message:(savedIssue && savedIssue.category==='temporary_service' ? 'Google is temporarily unavailable.' : 'Google temporarily limited requests.')+' Progress is saved. Automatic checks will retry after '+Utilities.formatDate(new Date(retryAfter),SCHOOL.timezone,'MMM d, h:mm:ss a')+' Central.',retrying:true,pending:0,setupPending:true,skipped:[],lastSync:p.getProperty('LAST_SYNC')};
+    }
+    if(!p.getProperty('OUTPUT_CALENDAR_ID')) throw new Error('Open the website and enable free periods.');
+    const sources=sources_(),schoolId=schoolId_();
+    installTriggers_([schoolId].concat(sources.map(c=>c.id)));
+    const today=Utilities.formatDate(new Date(),SCHOOL.timezone,'yyyy-MM-dd');
+    const selection=syncWindow_(today,p);
+    const window=selection.window,nearby=selection.nearby;
+    if(selection.fullState) p.setProperty('FULL_SCAN_STATE',JSON.stringify(selection.fullState));
+    p.setProperty('SYNC_STARTED_AT',new Date(startedAt).toISOString());
+    const startKey=window.start,endKey=window.end;
+    const start=at_(startKey,'00:00'),end=at_(endKey,'00:00');
+    stage='Reading letter-day calendar';
+    p.setProperty('SYNC_STAGE',stage);
+    const school=readCalendar_(schoolId,start,end,'All LFA Events');
+    stage='Reading personal and checked calendars';
+    p.setProperty('SYNC_STAGE',stage);
+    const sourceCounts=[];
+    const personal=sources.flatMap(source=>{
+      const events=sourceEvents_(source,start,end);
+      sourceCounts.push({name:(source.summaryOverride || source.summary || 'Calendar').slice(0,100),events:events.length});
+      return events;
+    });
+    stage='Calculating free periods';
+    const planned=plan_(startKey,endKey,school,personal);
+    stage='Reading generated calendar';
+    const output=outputCalendar_();
+    const existing=readCalendar_(output,start,end,'LFA Free Periods');
+    color_(output);
+    let added=0,removed=0,updated=0;
+    const desired=planned.events,plannedCount=desired.size;
+    desired.forEach((want,key)=>{
+      want.extendedProperties={private:{lfaApp:MARKER,lfaKey:key}};
+    });
+    const removals=[],changes=[];
+    existing.forEach(event=>{
+      const key=managedKey_(event);
+      if(!key) return;
+      const want=desired.get(key);
+      if(!want) {removals.push(event);return;}
+      const meta=(event.extendedProperties || {}).private || {};
+      if(event.summary!==want.summary || +new Date(event.start.dateTime)!==+new Date(want.start.dateTime) ||
+          +new Date(event.end.dateTime)!==+new Date(want.end.dateTime) || event.colorId ||
+          event.transparency!=='transparent' || meta.lfaApp!==MARKER || meta.lfaKey!==key) {
+        changes.push({event:event,want:want});
+      }
+      desired.delete(key);
+    });
+    // Future entries first, while still supporting the whole August-May year.
+    const priority=(a,b)=>{
+      const x=a.start.dateTime || a.start.date,y=b.start.dateTime || b.start.date;
+      const xd=Utilities.formatDate(new Date(x),SCHOOL.timezone,'yyyy-MM-dd');
+      const yd=Utilities.formatDate(new Date(y),SCHOOL.timezone,'yyyy-MM-dd');
+      return Number(xd<today)-Number(yd<today) || +new Date(x)-+new Date(y);
+    };
+    removals.sort(priority);changes.sort((a,b)=>priority(a.want,b.want));
+    const additions=[...desired.values()].sort(priority);
+    const room=()=>added+removed+updated<SCHOOL.maxMutationsPerRun && Date.now()-startedAt<SCHOOL.maxRunMilliseconds;
+    let ri=0,ui=0,ai=0;
+    // Remove newly blocked periods before spending quota on backfill.
+    stage='Writing free-period changes';
+    p.setProperty('SYNC_STAGE',stage);
+    while(ri<removals.length && room()) {Calendar.Events.remove(output,removals[ri++].id);removed++;}
+    while(ri===removals.length && ui<changes.length && room()) {
+      const change=changes[ui++];Calendar.Events.update(change.want,output,change.event.id);updated++;
+    }
+    while(ri===removals.length && ui===changes.length && ai<additions.length && room()) {
+      Calendar.Events.insert(additions[ai++],output);added++;
+    }
+    const pending=removals.length-ri+changes.length-ui+additions.length-ai;
+    const lastSync=new Date().toISOString();
+    p.setProperty('LAST_SYNC',lastSync);p.deleteProperty('LAST_ERROR');p.deleteProperty('LAST_ISSUE');
+    p.deleteProperty('NEXT_SYNC_AFTER');p.deleteProperty('QUOTA_RETRY_COUNT');
+    const academic=academicWindow_(today);
+    let moreRanges=false,completedRanges=0,totalRanges=0;
+    if(!nearby && selection.fullState) {
+      const scan=selection.fullState;
+      if(!pending) {
+        scan.freeCount+=plannedCount;scan.skippedCount+=planned.skipped.length;scan.index++;
+      }
+      completedRanges=scan.index;totalRanges=scan.ranges.length;
+      moreRanges=scan.index<scan.ranges.length;
+      if(moreRanges) p.setProperty('FULL_SCAN_STATE',JSON.stringify(scan));
+      else {
+        p.deleteProperty('FULL_SCAN_STATE');
+        p.setProperty('FULL_SYNC_COMPLETE',academic.start+'/'+academic.end+'/'+output);
+        p.setProperty('LAST_FULL_SYNC',lastSync);
+        p.setProperty('FULL_FREE_COUNT',String(scan.freeCount));
+        p.setProperty('FULL_SKIPPED_COUNT',String(scan.skippedCount));
+      }
+    } else if(!nearby && !pending) {
+      p.setProperty('FULL_SYNC_COMPLETE',academic.start+'/'+academic.end+'/'+output);
+      p.setProperty('LAST_FULL_SYNC',lastSync);
+      p.setProperty('FULL_FREE_COUNT',String(plannedCount));
+      p.setProperty('FULL_SKIPPED_COUNT',String(planned.skipped.length));
+    }
+    const stalled=pending>0 && added+removed+updated===0;
+    const diagnostics={start:startKey,end:endKey,nearby:nearby,schoolEvents:school.length,
+      sources:sourceCounts.slice(0,40),planned:plannedCount,skipped:planned.skipped.length,
+      added:added,removed:removed,updated:updated,pending:pending,moreRanges:moreRanges,
+      completedRanges:completedRanges,totalRanges:totalRanges,seconds:Math.round((Date.now()-startedAt)/1000),stalled:stalled};
+    p.setProperty('LAST_DIAGNOSTICS',JSON.stringify(diagnostics));
+    p.setProperty('SYNC_STAGE','Finished current date range');
+    if(stalled) developerAlert_('failed','No progress in current date range',new Error('Execution time budget exhausted before pending changes could be written.'));
+    const retryNotice=nearby && p.getProperty('NOTIFICATION_ERROR');
+    const notification=(pending || moreRanges) ? '' : !nearby ? notifySetupComplete_(academic.start,academic.end,output,Number(p.getProperty('FULL_FREE_COUNT')),Number(p.getProperty('FULL_SKIPPED_COUNT'))) : retryNotice ?
+      notifySetupComplete_(academic.start,academic.end,output,Number(p.getProperty('FULL_FREE_COUNT') || 0),Number(p.getProperty('FULL_SKIPPED_COUNT') || 0)) : '';
+    const setupKey=academic.start+'/'+academic.end+'/'+output;
+    if(!pending && !moreRanges && p.getProperty('FULL_SYNC_COMPLETE')===setupKey)
+      developerAlert_('success','Initial school-year setup completed',null,{
+        setupKey:setupKey,start:academic.start,end:addDays_(academic.end,-1),
+        freeCount:Number(p.getProperty('FULL_FREE_COUNT') || 0),
+        skippedCount:Number(p.getProperty('FULL_SKIPPED_COUNT') || 0)});
+    const message=(nearby?'Nearby check: ':'Current setup range: ')+startKey+' through '+addDays_(endKey,-1)+'. Checked '+(sources.length+1)+' calendars. '+added+' added, '+updated+' adjusted, '+removed+' removed.'+(pending?' '+pending+' changes remain in this date range.':' Current date range complete.')+(moreRanges?' School-year progress: '+completedRanges+'/'+totalRanges+' date ranges complete.':'')+(stalled?' No changes were written despite pending work; check Executions for runtime or quota problems.':'')+(notification?'\n'+notification:'')+'\nLast successful check: '+Utilities.formatDate(new Date(lastSync),SCHOOL.timezone,'MMM d, h:mm:ss a')+' Central.';
+    p.setProperty('LAST_STATUS',message);
+    return {message:message,
+      skipped:planned.skipped,lastSync:lastSync,pending:pending,setupPending:!!(pending || moreRanges),diagnostics:diagnostics};
+  } catch(error) {
+    p.setProperty('LAST_ERROR',String(error.message || error));
+    const issue=classifyFailure_(error);
+    if(issue.retryable) {
+      const attempt=Math.min(6,Number(p.getProperty('QUOTA_RETRY_COUNT') || 0)+1);
+      const delay=Math.min(15*60000,30000*Math.pow(2,attempt-1))+Math.floor(Math.random()*15000);
+      p.setProperty('QUOTA_RETRY_COUNT',String(attempt));
+      p.setProperty('NEXT_SYNC_AFTER',String(Date.now()+delay));
+      issue.retryAfter=new Date(Date.now()+delay).toISOString();
+    }
+    issue.stage=stage;
+    p.setProperty('LAST_ISSUE',JSON.stringify(issue));
+    developerAlert_('failed',stage,error);throw error;
+  } finally {lock.releaseLock();}
+}
+
+// Rate limits may use HTTP 403, so classify them before permission failures.
+// Delay future trigger attempts; never sleep while holding a user's lock.
+function classifyFailure_(error) {
+  const text=String(error && (error.message || error) || '');
+  if(/429|rate.?limit|quota|too many|usageLimits/i.test(text))
+    return {category:'rate_limit',retryable:true,message:'Google temporarily limited calendar requests. Your progress is saved and automatic updates will retry.'};
+  if(/\b(500|502|503|504)\b|backend.?error|internal error|service unavailable|temporarily unavailable|timed? out|timeout|connection reset|network error/i.test(text))
+    return {category:'temporary_service',retryable:true,message:'Google is temporarily unavailable. Your progress is saved and automatic updates will retry.'};
+  if(/401|403|permission|authoriz|forbidden|access denied|must be shared|busy-only access/i.test(text))
+    return {category:'access',retryable:false,message:'Calendar access needs attention. Open the app with your LFA account, approve requested permissions, and check sharing for your selected calendars.'};
+  if(/404|not found|calendar.*unavailable/i.test(text))
+    return {category:'missing_calendar',retryable:false,message:'A calendar could not be found. Check that your selected calendars still exist and are shared with your LFA account.'};
+  return {category:'update_failure',retryable:false,message:'This update needs attention. Progress already written is kept. Check the diagnostic status before trying again.'};
+}
+
+function developerAlert_(kind,stage,error,details) {
+  // Reporting must never stop calendar processing. No event titles, calendar
+  // IDs, event lists or raw errors are emailed; exact errors stay in LAST_ERROR.
+  try {
+    const email=Session.getEffectiveUser().getEmail().toLowerCase();
+    if(!email.endsWith('@'+SCHOOL.allowedDomain)) return;
+    const p=PropertiesService.getUserProperties(),now=Date.now();
+    const text=String(error && (error.message || error) || '');
+    const category=kind==='success' ? 'Setup completed' : !error ? 'Setup started' :
+      /429|quota|rate limit|too many/i.test(text) ? 'Google quota or rate limit' :
+      /403|401|permission|authoriz|forbidden|access|share/i.test(text) ? 'Access or authorization' :
+      classifyFailure_(error).category==='temporary_service' ? 'Temporary Google service failure' :
+      /time range.*long/i.test(text) ? 'Requested calendar time range is too long' :
+      /timeout|timed out|execution time/i.test(text) ? 'Execution timeout' :
+      /404|not found|unavailable/i.test(text) ? 'Calendar unavailable or ID/access changed' :
+      /schedule|letter.day/i.test(text) ? 'Schedule configuration' : 'Other update failure';
+    const code=(text.match(/\b(400|401|403|404|409|429|500|503)\b/) || [])[1] || 'Not supplied';
+    const hint=/Access/.test(category) ? 'Check user authorization, source calendar sharing and deployment execution identity.' :
+      /quota/.test(category) ? 'Inspect Apps Script Executions and Google quotas; repeated full-year checks may need fewer API calls.' :
+      /time range/.test(category) ? 'Verify busy-only calendars are read in short date chunks.' :
+      /unavailable/.test(category) ? 'Verify configured calendar IDs and whether the affected account can still read them.' :
+      /timeout/.test(category) ? 'Reduce work per run and inspect the latest execution.' :
+      'Inspect the affected account\'s app status and Apps Script Executions for the exact error.';
+    // One start alert per account per ten minutes. Identical failure categories
+    // are limited to one alert per account per six hours, including nested catches.
+    const key='DEV_ALERT_'+kind;
+    const fingerprint=kind==='success' ? kind+'/'+details.setupKey : kind+'/'+category+'/'+code;
+    const previous=JSON.parse(p.getProperty(key) || 'null');
+    const interval=kind==='success' ? Infinity : kind==='started' ? 10*60000 : 6*3600000;
+    if(previous && previous.fingerprint===fingerprint && now-previous.time<interval) return;
+    const retry=Number(p.getProperty('DEV_ALERT_RETRY_AFTER') || 0);
+    if(retry>now) return;
+    if(MailApp.getRemainingDailyQuota()<1) throw new Error('No email quota available.');
+    MailApp.sendEmail({to:SCHOOL.developerEmail,name:'LFA Free Periods diagnostics',
+      subject:kind==='started' ? 'LFA Free Periods: setup requested' : kind==='success' ? 'LFA Free Periods: setup completed'+(details.skippedCount?' — dates skipped':'') : 'LFA Free Periods: update failed',
+      body:'LFA account: '+email+'\nTime: '+new Date(now).toISOString()+'\nStage: '+stage+
+        '\nCategory: '+category+'\nGoogle error code: '+code+
+        (error?'\nSuggested check: '+hint:kind==='success' ?
+          '\nSchool year: '+details.start+' through '+details.end+'\nFree blocks calculated: '+details.freeCount+
+          '\nDates skipped: '+details.skippedCount+(details.skippedCount?'\nSome dates lack confirmed schedule information. This does not confirm complete date coverage.':'') :
+          '\nThis confirms a setup request, not successful completion.')+
+        '\n\nEvent details are not included. Missing/ambiguous letter days can be skipped without throwing an error; this alert does not diagnose every incorrect free block.'});
+    p.setProperty(key,JSON.stringify({fingerprint:fingerprint,time:now}));
+    p.deleteProperty('DEV_ALERT_ERROR');p.deleteProperty('DEV_ALERT_RETRY_AFTER');
+  } catch(alertError) {
+    try {
+      const p=PropertiesService.getUserProperties();
+      p.setProperty('DEV_ALERT_ERROR','Developer notification unavailable. Check email authorization/quota.');
+      p.setProperty('DEV_ALERT_RETRY_AFTER',String(Date.now()+15*60000));
+    } catch(ignored) {}
+  }
+}
+
+// Fill the year first. Once complete, ordinary checks read only today plus
+// the next 35 days. Six-hour full passes keep farther-out dates reconciled.
+function syncWindow_(today,p) {
+  const year=academicWindow_(today);
+  const key=year.start+'/'+year.end+'/'+p.getProperty('OUTPUT_CALENDAR_ID');
+  const last=Date.parse(p.getProperty('LAST_FULL_SYNC') || '');
+  let state;
+  try {state=JSON.parse(p.getProperty('FULL_SCAN_STATE') || 'null');} catch(ignored) {}
+  const valid=state && state.key===key && Array.isArray(state.ranges) && state.index>=0 && state.index<state.ranges.length;
+  if(valid || !SCHOOL.nearbyDays || p.getProperty('FULL_SYNC_COMPLETE')!==key ||
+      !Number.isFinite(last) || Date.now()-last>=SCHOOL.fullCheckMinutes*60000) {
+    if(!valid) {
+      const split=today>year.start && today<year.end ? today : year.start;
+      const ranges=[];
+      for(const span of [[split,year.end],[year.start,split]]) {
+        for(let start=span[0];start<span[1];) {
+          const next=addDays_(start,SCHOOL.scanChunkDays);
+          const end=next<span[1]?next:span[1];ranges.push({start:start,end:end});start=end;
+        }
+      }
+      state={key:key,ranges:ranges,index:0,freeCount:0,skippedCount:0};
+    }
+    return {window:state.ranges[state.index],nearby:false,fullState:state};
+  }
+  const start=today>year.start ? today : year.start;
+  const end=addDays_(today,SCHOOL.nearbyDays+1);
+  if(end<=start) return {window:year,nearby:false};
+  return {window:{start:start,end:end<year.end?end:year.end},nearby:true};
+}
+
+// Called under the per-user sync lock, only after all planned writes finish.
+// One confirmation per school-year/output pair, not one email per meeting.
+function notifySetupComplete_(startKey,endKey,outputId,freeCount,skippedCount) {
+  const p=PropertiesService.getUserProperties();
+  const key=startKey+'/'+outputId;
+  if(p.getProperty('NOTIFIED_SETUP')===key) return 'Setup confirmation email has been sent to your LFA account.';
+  const email=Session.getEffectiveUser().getEmail().toLowerCase();
+  if(email!==p.getProperty('ACCOUNT_EMAIL') || !email.endsWith('@'+SCHOOL.allowedDomain))
+    throw new Error('Cannot notify a different account.');
+  try {
+    if(MailApp.getRemainingDailyQuota()<1) throw new Error('Email quota is temporarily unavailable.');
+    MailApp.sendEmail({to:email,name:'LFA Free Periods',
+      subject:skippedCount ? 'LFA Free Periods: setup finished — some dates skipped' : 'Your LFA free periods are ready',
+      body:'Your free-period setup has finished processing all currently planned changes.\n\n'+
+        'School year: '+startKey+' through '+addDays_(endKey,-1)+'\n'+
+        'Free-period blocks calculated: '+freeCount+'\n'+
+        (skippedCount ? 'Dates skipped: '+skippedCount+'. Missing/conflicting letter-day markers or unconfirmed special schedules prevent blocks on those dates. This email does not confirm coverage of every school date.\n' : '')+
+        '\nOpen Google Calendar with your LFA account and keep LFA Free Periods checked:\n'+calendarUrl_(outputId)+
+        '\n\nYou can keep the website closed. Automatic checks continue while authorization, triggers and Google quotas permit. Newly booked meetings remove overlapping free blocks after a successful update.'});
+    p.setProperty('NOTIFIED_SETUP',key);p.deleteProperty('NOTIFICATION_ERROR');
+    return 'Setup confirmation email sent to your LFA account.';
+  } catch(error) {
+    p.setProperty('NOTIFICATION_ERROR',String(error.message || error));
+    return 'Your calendar update finished. The confirmation email is delayed; we will retry on the next successful check.';
+  }
+}
+
+function managedKey_(event) {
+  const meta=(event.extendedProperties || {}).private || {};
+  if(meta.lfaApp===MARKER && /^\d{4}-\d{2}-\d{2}\/[1-8]$/.test(meta.lfaKey || '')) return meta.lfaKey;
+  // Older descriptions may contain spaces, HTML, or altered line breaks.
+  const text=(event.description || '').replace(/<[^>]*>/g,' ').replace(/&nbsp;/gi,' ').replace(/\s+/g,' ');
+  const match=text.match(/\bLFA_FREE_PERIODS_V1\s+(\d{4}-\d{2}-\d{2}\/[1-8])\b/);
+  return match ? match[1] : null;
+}
+
+function events_(id, start, end) {
+  let result = [], token;
+  do {
+    const page = Calendar.Events.list(id, {timeMin:start.toISOString(), timeMax:end.toISOString(),
+      timeZone:SCHOOL.timezone, singleEvents:true, showDeleted:false, maxResults:2500, pageToken:token});
+    result = result.concat(page.items || []); token = page.nextPageToken;
+  } while (token);
+  const email=Session.getEffectiveUser().getEmail().toLowerCase();
+  return result.filter(e=>e.status!=='cancelled' && !(e.attendees || []).some(a=>
+    (a.self || (a.email || '').toLowerCase()===email) && a.responseStatus==='declined')); 
+}
+function color_(id) {
+  ensureOutputListed_(id);
+  Calendar.CalendarList.patch({backgroundColor:SCHOOL.lightGray, foregroundColor:'#000000', selected:true},
+    id, {colorRgbFormat:true});
+}
+function calendarUrl_(id) {
+  // Open Calendar for the authorized account. A cid link can launch an
+  // Add calendar dialog, especially when account 0 is a personal account.
+  return 'https://calendar.google.com/calendar/r?authuser=' +
+    encodeURIComponent(Session.getEffectiveUser().getEmail().toLowerCase());
+}
+function range_(e) { return [e.start.dateTime ? new Date(e.start.dateTime) : at_(e.start.date,'00:00'),
+  e.end.dateTime ? new Date(e.end.dateTime) : at_(e.end.date,'00:00')]; }
+function overlaps_(a,b,c,d) { return +a < +d && +c < +b; }
+function letter_(s) {
+  // Read the leading A-G day marker; ignore descriptive suffixes, including
+  // "(Tuesday with Break)" and "with (Tuesday with Break)".
+  if(typeof s!=='string') return null;
+  const text=s.trim();
+  const m=text.match(/^(?:([A-G])\s*[-\u2010-\u2015\u2212]?\s*day\b|day\s*[-\u2010-\u2015\u2212]?\s*([A-G])\b)/i);
+  if(!m) return null;
+  const letter=(m[1] || m[2]).toUpperCase();
+  // A title explicitly containing another letter-day marker is ambiguous.
+  const other=text.slice(m[0].length).match(/\b(?:([A-G])\s*[-\u2010-\u2015\u2212]?\s*day\b|day\s*[-\u2010-\u2015\u2212]?\s*([A-G])\b)/gi) || [];
+  if(other.some(value=>{
+    const match=value.match(/^(?:([A-G])\s*[-\u2010-\u2015\u2212]?\s*day|day\s*[-\u2010-\u2015\u2212]?\s*([A-G]))/i);
+    return (match[1] || match[2]).toUpperCase()!==letter;
+  })) return null;
+  return letter;
+}
+function plan_(today, endKey, schoolEvents, personalEvents) {
+  const desired = new Map(), skipped = [];
+  const overrides = Object.assign({}, SCHOOL.overrides, storedOverrides_());
+  for (let key=today; key<endKey; key=addDays_(key,1)) {
+    const weekday = new Date(key+'T12:00:00Z').getUTCDay();
+    if (weekday === 0 || weekday === 6) continue;
+    const a=at_(key,'00:00'), b=at_(addDays_(key,1),'00:00');
+    const onDate = e => {const r=range_(e); return overlaps_(a,b,r[0],r[1]);};
+    const school=schoolEvents.filter(onDate), personal=personalEvents.filter(onDate);
+    const overridden=Object.prototype.hasOwnProperty.call(overrides,key);
+    if (overridden && overrides[key] === null) continue;
+    if (!overridden && school.some(e => SCHOOL.noSchoolPattern.test(e.summary || ''))) continue;
+    const letters=[...new Set(school.filter(e => e.start.date).map(e => letter_(e.summary)).filter(Boolean))];
+    if (letters.length !== 1) {skipped.push(key+': no unique letter-day marker'); continue;}
+    if (!overridden && school.some(e => SCHOOL.specialSchedulePattern.test(e.summary || ''))) {
+      skipped.push(key+': special bell schedule needs review'); continue;
+    }
+    if (personal.some(e => e.start.date && SCHOOL.absencePattern.test(e.summary || ''))) continue;
+    const letter=letters[0], asm=SCHOOL.fTuesdayAsmDates.includes(key) || school.some(e =>
+      e.start.dateTime && /\b(ASM|all[ -]school meeting)\b/i.test(e.summary || ''));
+    const slots=overridden ? overrides[key] : bellSchedule_(letter,weekday,asm);
+    const busy=school.concat(personal).filter(e => e.start.dateTime).map(range_);
+    slots.forEach((slot,index) => {
+      const start=at_(key,slot[0]), end=at_(key,slot[1]);
+      if (!(end>start)) throw new Error('Invalid bell schedule: '+key);
+      if (busy.some(r => overlaps_(start,end,r[0],r[1]))) return;
+      const eventKey=key+'/'+(index+1);
+      desired.set(eventKey,{summary:'Free Period '+letter+(index+1),
+        start:{dateTime:start.toISOString(),timeZone:SCHOOL.timezone},
+        end:{dateTime:end.toISOString(),timeZone:SCHOOL.timezone},
+        description:MARKER+'\n'+eventKey+'\nCalculated from your selected calendars, All LFA Events, and the LFA bell schedule.',
+        transparency:'transparent', reminders:{useDefault:false}});
+    });
+  }
+  return {events:desired, skipped:skipped};
+}
+function bellSchedule_(letter,weekday,asm) {
+  const t=SCHOOL.bellTimes;
+  if (letter==='G') return t.lateMorning;
+  if (letter==='D') return t.lateMorning.concat(t.normalAfternoon);
+  if (letter==='F' && (weekday!==2 || asm)) return t.normalMorning.concat(t.asmAfternoon);
+  return t.normalMorning.concat(weekday===2 ? t.tuesdayAfternoon : t.normalAfternoon);
+}
+function addDays_(key,n) {const d=new Date(key+'T12:00:00Z');d.setUTCDate(d.getUTCDate()+n);return d.toISOString().slice(0,10);}
+function at_(key,time) {
+  const offset=Utilities.formatDate(new Date(key+'T18:00:00Z'),SCHOOL.timezone,'Z');
+  return new Date(key+'T'+time+':00'+offset.slice(0,3)+':'+offset.slice(3));
+}
+
+function admin_() {
+  if (!SCHOOL.adminEmails.includes(identity_())) throw new Error('Only a school schedule administrator can change shared bell times.');
+}
+function dateKey_(key) {
+  if (typeof key !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(key) ||
+      new Date(key+'T12:00:00Z').toISOString().slice(0,10) !== key) throw new Error('Choose a valid date.');
+  return key;
+}
+function getDateSchedule(key) {
+  admin_(); dateKey_(key);
+  const school=events_(schoolId_(),at_(key,'00:00'),at_(addDays_(key,1),'00:00'));
+  const letters=[...new Set(school.filter(e=>e.start.date).map(e=>letter_(e.summary)).filter(Boolean))];
+  if (letters.length !== 1) throw new Error('This date needs exactly one A–G day marker in All LFA Events first.');
+  const letter=letters[0],weekday=new Date(key+'T12:00:00Z').getUTCDay();
+  const asm=SCHOOL.fTuesdayAsmDates.includes(key) || school.some(e=>e.start.dateTime && /\b(ASM|all[ -]school meeting)\b/i.test(e.summary || ''));
+  const all=storedOverrides_();
+  const has=Object.prototype.hasOwnProperty.call(all,key);
+  return {date:key,letter:letter,closed:has && all[key]===null,
+    custom:has,slots:has && all[key]!==null ? all[key] : bellSchedule_(letter,weekday,asm)};
+}
+function saveDateSchedule(key, slots) {
+  admin_(); dateKey_(key);
+  if (slots !== null) {
+    if (!Array.isArray(slots) || slots.length<1 || slots.length>8) throw new Error('Supply 1–8 periods.');
+    let prior='00:00';
+    slots.forEach(slot=>{
+      if (!Array.isArray(slot) || slot.length!==2 || slot.some(t=>typeof t!=='string' || !/^([01]\d|2[0-3]):[0-5]\d$/.test(t)) ||
+          slot[1]<=slot[0] || slot[0]<prior) throw new Error('Period times must be valid, ordered, and non-overlapping.');
+      prior=slot[1];
+    });
+  }
+  const lock=LockService.getScriptLock();lock.waitLock(10000);
+  try {
+    PropertiesService.getScriptProperties().setProperty('OVERRIDE_'+key,JSON.stringify(slots));
+  } finally {lock.releaseLock();}
+  return {message:'School schedule saved for '+key+'. Each user receives it on their next successful update. Update the source class events to match these times too.'};
+}
+function resetDateSchedule(key) {
+  admin_();dateKey_(key);
+  const lock=LockService.getScriptLock();lock.waitLock(10000);
+  try {
+    PropertiesService.getScriptProperties().deleteProperty('OVERRIDE_'+key);
+  } finally {lock.releaseLock();}
+  return {message:'Custom schedule removed. This date now uses the regular rules.'};
+}
+
+function storedOverrides_() {
+  const props=PropertiesService.getScriptProperties().getProperties(), all={};
+  Object.keys(props).filter(k=>k.startsWith('OVERRIDE_')).forEach(k=>{all[k.slice(9)]=JSON.parse(props[k]);});
+  return all;
+}
+
+// A calendar resource and the user's calendar-list entry are separate.
+// Reuse the existing calendar; add its missing list entry before checking it.
+function ensureOutputListed_(id) {
+  try {
+    return Calendar.CalendarList.get(id);
+  } catch (error) {
+    if (!/\b404\b|not found/i.test(String(error.message || error))) throw error;
+  }
+  // Confirm that the calendar itself still exists and is accessible.
+  // Do not create a duplicate or erase its saved ID on an access failure.
+  Calendar.Calendars.get(id);
+  const entry = Calendar.CalendarList.insert({id:id,selected:true});
+  return entry.accessRole ? entry : Calendar.CalendarList.get(id);
+}
+
+// Busy-only calendars are supported without requesting event details.
+function sourceEvents_(source, start, end) {
+  if (source.accessRole !== 'freeBusyReader') {
+    return readCalendar_(source.id, start, end, source.summary || 'your main calendar');
+  }
+  // The free/busy endpoint cannot accept a full academic year in one call.
+  // Read consecutive 28-day windows and combine all busy intervals.
+  const chunkMilliseconds = 28 * 24 * 60 * 60 * 1000;
+  const output = [], seen = new Set();
+  for (let cursor = +start; cursor < +end;) {
+    const next = Math.min(cursor + chunkMilliseconds, +end);
+    let result;
+    try {
+      result = Calendar.Freebusy.query({
+        timeMin: new Date(cursor).toISOString(),
+        timeMax: new Date(next).toISOString(),
+        timeZone: SCHOOL.timezone,
+        items: [{id: source.id}]
+      });
+    } catch (error) {
+      throw new Error('Could not check availability for ' + (source.summary || 'a busy-only calendar') + ': ' + String(error.message || error));
+    }
+    const calendar = (result.calendars || {})[source.id];
+    if (!calendar || (calendar.errors || []).length) {
+      throw new Error('Could not read availability for ' + (source.summary || 'a visible busy-only calendar') + '. Check its Calendar sharing permissions.');
+    }
+    (calendar.busy || []).forEach(block => {
+      const key = block.start + '/' + block.end;
+      if (seen.has(key)) return;
+      seen.add(key);
+      output.push({start: {dateTime: block.start}, end: {dateTime: block.end}});
+    });
+    cursor = next;
+  }
+  return output;
+}
+
+function calendarChanged() {
+  // A calendar-change trigger signals a change; rebuild the current window.
+  return syncFreePeriods();
+}
+
+function installTriggers_(sourceIds) {
+  const p=PropertiesService.getUserProperties();
+  let all=ScriptApp.getProjectTriggers();
+  let clocks=all.filter(t=>t.getHandlerFunction()==='syncFreePeriods');
+  const version='visible-calendars-one-minute-v1';
+  if(p.getProperty('TRIGGER_VERSION')!==version || !clocks.length) {
+    clocks.forEach(t=>ScriptApp.deleteTrigger(t));
+    ScriptApp.newTrigger('syncFreePeriods').timeBased().everyMinutes(SCHOOL.refreshMinutes).create();
+    p.setProperty('TRIGGER_VERSION',version);
+  } else clocks.slice(1).forEach(t=>ScriptApp.deleteTrigger(t));
+  all=ScriptApp.getProjectTriggers();
+  const other=all.filter(t=>!['syncFreePeriods','calendarChanged'].includes(t.getHandlerFunction()));
+  const maximum=Math.max(0,19-other.length);
+  const ids=[...new Set(sourceIds)].slice(0,maximum);
+  const current=new Set();
+  all.filter(t=>t.getHandlerFunction()==='calendarChanged').forEach(t=>{
+    const id=t.getTriggerSourceId();
+    if(!ids.includes(id) || current.has(id)) ScriptApp.deleteTrigger(t);
+    else current.add(id);
+  });
+  const now=Date.now();
+  ids.filter(id=>!current.has(id)).forEach(id=>{
+    const key='WATCH_RETRY_'+encodeURIComponent(id);
+    if(Number(p.getProperty(key) || 0)>now) return;
+    try {
+      ScriptApp.newTrigger('calendarChanged').forUserCalendar(id).onEventUpdated().create();
+      p.deleteProperty(key);
+    } catch(error) {
+      // Unsupported watch or policy restriction: the minute check still reads it.
+      p.setProperty(key,String(now+6*60*60*1000));
+    }
+  });
+}
+
+function notFound_(error) {return /\b404\b|not found/i.test(String(error.message || error));}
+function readCalendar_(id,start,end,label) {
+  try {return events_(id,start,end);}
+  catch(error) {
+    if(notFound_(error)) throw new Error('Cannot access '+label+'. Its calendar ID may have changed or your account may not have permission. Check Google Calendar sharing/settings.');
+    throw new Error('Could not read '+label+': '+String(error.message || error));
+  }
+}
+function outputCalendar_() {
+  const p=PropertiesService.getUserProperties();let id=p.getProperty('OUTPUT_CALENDAR_ID');
+  if(id) {
+    try {
+      const entry=ensureOutputListed_(id);
+      if(entry.accessRole!=='owner') throw new Error('The saved free-period calendar is not owned by this account.');
+      return id;
+    } catch(error) {
+      if(!notFound_(error)) throw error;
+      // Only replace this user's unavailable output. Never alter source calendars.
+      p.setProperty('PREVIOUS_OUTPUT_CALENDAR_ID',id);
+    }
+  }
+  const created=Calendar.Calendars.insert({summary:'LFA Free Periods',timeZone:SCHOOL.timezone,
+    description:'Automatically calculated free periods.'});
+  id=created.id;p.setProperty('OUTPUT_CALENDAR_ID',id);
+  const entry=ensureOutputListed_(id);
+  if(entry.accessRole!=='owner') throw new Error('Could not register your new free-period calendar.');
+  return id;
+}
+
+function academicWindow_(today) {
+  const year=Number(today.slice(0,4)),month=Number(today.slice(5,7));
+  // In June/July, prepare the upcoming August-May school year.
+  const firstYear=month>=6 ? year : year-1;
+  return {start:firstYear+'-08-01',end:(firstYear+1)+'-06-01'};
+}
+
+function busyResponse_() {
+  const p=PropertiesService.getUserProperties();
+  const id=p.getProperty('OUTPUT_CALENDAR_ID');
+  return {busy:true,message:'Your calendar is already updating. Please give it a moment; the update will continue automatically.',
+    calendarUrl:id ? calendarUrl_(id) : null,lastSync:p.getProperty('LAST_SYNC'),skipped:[]};
+}
+
+const WEB_HTML = String.raw`<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><base target="_top">
+<style>
+*{box-sizing:border-box}body{margin:0;padding:24px;min-height:100vh;display:grid;place-items:center;background:#111111;color:#111111;font:16px/1.5 system-ui,sans-serif}.card{width:100%;max-width:450px;padding:32px;background:#fff;border:1px solid #dddddd;border-top:7px solid #e57200;border-radius:18px}h1{font:400 38px/1.12 Georgia,serif;margin:16px 0}p{color:#5c5c5c;font-size:14px}.brand{font-size:12px;letter-spacing:.14em;text-transform:uppercase}label{display:block;font-weight:650;margin:22px 0 7px}input{width:100%;padding:12px;border:1px solid #bfbfbf;border-radius:8px;font:inherit}button{width:100%;padding:14px;border:0;border-radius:8px;background:#e57200;color:#111111;font:600 15px system-ui;margin-top:16px;cursor:pointer}button:disabled{opacity:.55;cursor:wait}.status{padding:12px;border-radius:8px;background:#fff3e8;font-size:14px;margin-top:16px;white-space:pre-wrap}.status:empty{display:none}.error{background:#fff0e3;color:#111111;border-left:4px solid #d55500}.note{font-size:12px}.link{display:block;text-align:center;margin-top:16px;color:#111111;font-weight:650}.hidden{display:none}input:focus,button:focus-visible,a:focus-visible{outline:3px solid #e57200;outline-offset:2px}
+</style></head>
+<body><main class="card">
+<div class="brand">Lake Forest Academy</div>
+<h1>Your free periods,<br>automatically.</h1>
+<p>We check All LFA Events, your main calendar, and the calendars checked in your Google Calendar view. We cover the August–May school year wherever A–G day markers are published. Free periods appear in light gray.</p>
+<p>We automatically add the shared LFA letter-day calendar if it is missing. Your LFA account must have permission to see its event details.</p>
+<p><strong>Start setup once, then let it run.</strong> Initial setup may take 30 minutes to several hours, depending on your calendars and Google's processing limits. You can close this page after setup is enabled. Keep the same calendars checked in Google Calendar until you receive the completion email; changing which calendars are checked can change your calculated free periods. You do not need to click Update repeatedly.</p>
+<form id="form">
+<label for="email">Your LFA email</label>
+<input id="email" type="email" placeholder="you@lfanet.org" autocomplete="email" required disabled>
+<button id="submit" type="submit" disabled>Add my free periods</button>
+</form>
+<div id="status" class="status" role="status" aria-live="polite">Connecting your Google account…</div>
+<details style="margin-top:16px;font-size:12px"><summary>Setup progress and diagnostics</summary><pre id="diagnostics" style="white-space:pre-wrap;overflow-wrap:anywhere">No completed check yet.</pre></details>
+<p id="lastCheck" class="note"></p>
+<a id="open" class="link hidden" target="_blank" rel="noopener">Open my calendar ↗</a>
+<p class="note">Keep your class calendar checked in Google Calendar. Shared calendars block time for all their bookings. Google authorization is required. Changes refresh automatically; timing depends on Google.</p>
+</main>
+<script>
+function el(id){return document.getElementById(id);}
+function message(text,error){el('status').textContent=text;el('status').classList.toggle('error',!!error);}
+function link(url){if(url){el('open').href=url;el('open').classList.remove('hidden');}}
+function showDiagnostics(value,stage){
+ let d;try{d=typeof value==='string'?JSON.parse(value):value;}catch(e){}
+ const lines=stage?['Last recorded stage: '+stage]:[];
+ if(d){lines.push('Date range: '+d.start+' to '+d.end+' (end excluded)','Calculated free blocks: '+d.planned,'Skipped dates: '+d.skipped,'Pending changes in this range: '+d.pending,'Date ranges completed: '+d.completedRanges+'/'+d.totalRanges,'Check duration: '+d.seconds+' seconds','Source calendars (events in this range):');(d.sources||[]).forEach(c=>lines.push(c.name+': '+c.events));}
+ el('diagnostics').textContent=lines.join('\n')||'No completed check yet.';
+}
+function failure(e){el('submit').disabled=false;el('open').classList.add('hidden');message(e.message||String(e),true);}
+el('form').addEventListener('submit',function(e){
+ e.preventDefault();el('submit').disabled=true;message('Starting setup… After authorization and background updates are enabled, you can close this page. Initial setup may take 30 minutes to several hours. Keep the same calendars checked until you receive the completion email. You do not need to click Update repeatedly.');
+ google.script.run.withSuccessHandler(function(r){el('submit').disabled=false;el('submit').textContent='Update my free periods';message(r.message+((r.skipped||[]).length?' Some dates need confirmed school schedule information.':''),!!r.needsAttention);link(r.calendarUrl);showDiagnostics(r.diagnostics);if(r.lastSync)el('lastCheck').textContent='Last successful update: '+new Date(r.lastSync).toLocaleString();}).withFailureHandler(failure).activate(el('email').value);
+});
+if(typeof google!=='undefined'&&google.script&&google.script.run){
+ google.script.run.withSuccessHandler(function(s){el('email').value=s.email;el('email').disabled=false;el('submit').disabled=false;if(s.enabled)el('submit').textContent='Update my free periods';message(s.lastError?(s.issue ? s.issue.message : 'Last update needs attention: '+s.lastError):(s.lastStatus||'')+(s.notificationError?'\nConfirmation email is delayed; automatic checks will retry.':''),!!s.lastError && !(s.issue && s.issue.retryable));link(s.calendarUrl);showDiagnostics(s.diagnostics,s.stage);if(s.lastSync)el('lastCheck').textContent='Last successful update: '+new Date(s.lastSync).toLocaleString();}).withFailureHandler(function(e){message(e.message||String(e),true);}).getSetup();
+}else{message('Preview only. Open the deployed Apps Script website to authorize your account.');}
+</script></body></html>
+`;
