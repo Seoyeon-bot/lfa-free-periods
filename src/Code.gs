@@ -1,4 +1,5 @@
 /*
+Updated date : Nov 18th 8:45 AM 
 LFA FREE PERIODS — BLACK / ORANGE / WHITE
 Replace ALL Code.gs with this file. Keep Google Calendar API enabled.
 Deploy > Manage deployments > Edit > New version > Deploy.
