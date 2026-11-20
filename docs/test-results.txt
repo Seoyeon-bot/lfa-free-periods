@@ -1,6 +1,6 @@
 
 > lfa-free-periods@1.0.0 test
-> node tests/calendar.test.cjs && node --test tests/deploy.test.cjs && node tests/concurrent-users.test.cjs && node tests/dashboard-compatibility.test.cjs && node tests/html-routing.test.cjs
+> node tests/calendar.test.cjs && node --test tests/deploy.test.cjs && node tests/concurrent-users.test.cjs && node tests/dashboard-compatibility.test.cjs && node tests/html-routing.test.cjs && node tests/admin-privacy.test.cjs
 
 PASS Coworker A authorizes and gets a private output calendar
 PASS Coworker B gets a separate output and different availability
@@ -65,12 +65,12 @@ PASS Bounded Unicode diagnostics stay under one property value limit
 PASS 7 admin monitoring checks (including server-side authorization and reporting failure isolation).
 PASS Fifty account reports keep distinct shared keys and cannot choose another identity
 PASS 8 admin monitoring checks total.
-✔ deployment requires all three configuration secrets (0.915958ms)
-✔ bad credentials fail with a generic message without exposing their value (0.178583ms)
-✔ URL pasted instead of Script ID or deployment ID is rejected (0.300584ms)
-✔ deployment includes only src and credentials are private temporary files (2.598375ms)
-✔ failed validation writes no credential files (0.962917ms)
-✔ workflow deployment depends on passing tests and is restricted to main (0.492667ms)
+✔ deployment requires all three configuration secrets (1.0195ms)
+✔ bad credentials fail with a generic message without exposing their value (0.242292ms)
+✔ URL pasted instead of Script ID or deployment ID is rejected (0.326625ms)
+✔ deployment includes only src and credentials are private temporary files (2.509209ms)
+✔ failed validation writes no credential files (0.472667ms)
+✔ workflow deployment depends on passing tests and is restricted to main (0.507375ms)
 ℹ tests 6
 ℹ suites 0
 ℹ pass 6
@@ -78,14 +78,18 @@ PASS 8 admin monitoring checks total.
 ℹ cancelled 0
 ℹ skipped 0
 ℹ todo 0
-ℹ duration_ms 81.35275
+ℹ duration_ms 96.884417
 PASS 50 concurrent simulated teachers: isolated output, correct busy periods, no cross-account writes.
-Simulation completed in 0.7s. This is NOT a Google API latency, quota, email, or deployment benchmark.
+Simulation completed in 0.5s. This is NOT a Google API latency, quota, email, or deployment benchmark.
 PASS 36 production helpers, population configuration, calendar writes and checkpoint logic match the pre-dashboard version.
 PASS 50 teacher schedules match old population, batch completion, meeting removal/restoration, day changes and confirmation emails; dashboard unavailable=false.
 PASS 50 teacher schedules match old population, batch completion, meeting removal/restoration, day changes and confirmation emails; dashboard unavailable=true.
 PASS Both versions finish December–January backfill across the no-letter-day holiday gap.
 PASS Switching versions during partial setup resumes existing progress without duplicate blocks and sends one teacher completion email.
-PASS All backend logic outside the HTML loader matches the dashboard version before formatting.
+PASS All calendar/backend logic outside HTML loading and admin reporting matches the dashboard version before formatting.
 PASS Index.html keeps the same browser JavaScript and server calls.
 PASS Normal users load Index.html; only the approved admin can load Admin.html; non-LFA users are rejected.
+PASS Only the authenticated admin account can access dashboard endpoints; typing an email or mismatched identity does not grant access.
+PASS Legacy shared reports are cleaned; private source names, IDs, counts, skipped details and raw messages never reach the dashboard.
+PASS New reports store safe technical causes and timestamps without source-calendar details.
+PASS The application has one email call: the authenticated teacher completion email, with no personal-address recipient, CC, BCC, or developer alert.

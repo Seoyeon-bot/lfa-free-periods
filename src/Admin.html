@@ -239,6 +239,18 @@
               'Last recorded issue: ' + u.lastIssue.category
             );
             add(detail, 'div', u.lastIssue.message);
+            if (
+              u.lastSuccessfulCheck &&
+              Date.parse(u.lastSuccessfulCheck) > Date.parse(u.lastIssue.at)
+            ) {
+              add(
+                detail,
+                'small',
+                'A successful check was recorded after this issue: ' +
+                  when(u.lastSuccessfulCheck)
+              );
+            }
+
             add(
               detail,
               'small',
@@ -253,16 +265,8 @@
           const lines = [
             'Last completed batch duration: ' +
               (u.seconds === null ? 'Unknown' : u.seconds + ' seconds'),
-            'Last completed batch planned blocks: ' + u.planned,
-            'Source calendars from last completed batch:'
+            'Last completed batch planned blocks: ' + u.planned
           ];
-          (u.sources || []).forEach((c) =>
-            lines.push(c.name + ': ' + c.events + ' events')
-          );
-          lines.push(
-            'Recent skipped-date sample (may be from an earlier range):'
-          );
-          (u.skippedSample || []).forEach((s) => lines.push(s));
           lines.push('Recent activity:');
           (u.history || []).forEach((h) =>
             lines.push(when(h.at) + ' · ' + h.state + ' · ' + h.stage)

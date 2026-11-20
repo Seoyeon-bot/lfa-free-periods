@@ -20,7 +20,12 @@ const clean = (node) =>
 const withoutPage = (code) =>
   clean(
     parse(code).body.filter((node) => {
-      if (node.type === 'FunctionDeclaration' && node.id.name === 'doGet')
+      if (
+        node.type === 'FunctionDeclaration' &&
+        ['doGet', 'monitor_', 'getAdminStatus', 'safeMonitorRecord_'].includes(
+          node.id.name
+        )
+      )
         return false;
       return !(
         node.type === 'VariableDeclaration' &&
@@ -34,7 +39,7 @@ assert.deepEqual(
   'The cleanup must not change any non-page backend logic'
 );
 console.log(
-  'PASS All backend logic outside the HTML loader matches the dashboard version before formatting.'
+  'PASS All calendar/backend logic outside HTML loading and admin reporting matches the dashboard version before formatting.'
 );
 
 const oldContext = vm.createContext({});
@@ -60,6 +65,19 @@ const context = vm.createContext({
     getActiveUser: () => ({ getEmail: () => account })
   },
   HtmlService: {
+    createTemplateFromFile(file) {
+      return {
+        isAdmin: false,
+        evaluate() {
+          const output = context.HtmlService.createHtmlOutputFromFile(file);
+          output.contents = output.contents.replace(
+            /<\? if \(isAdmin\) \{ \?>([\s\S]*?)<\? \} \?>/g,
+            (_whole, body) => (this.isAdmin ? body : '')
+          );
+          return output;
+        }
+      };
+    },
     createHtmlOutputFromFile(file) {
       const contents = fs.readFileSync(path.join(src, file + '.html'), 'utf8');
       return {
@@ -78,11 +96,14 @@ const context = vm.createContext({
 });
 vm.runInContext(current, context);
 assert.equal(context.doGet().file, 'Index');
+assert.ok(!context.doGet().contents.includes('id="adminLink"'));
+assert.ok(!context.doGet().contents.includes('Admin diagnostics ↗'));
 assert.throws(
   () => context.doGet({ parameter: { admin: '1' } }),
   /administrator/
 );
 account = 'seoyeon.choi@lfanet.org';
+assert.ok(context.doGet().contents.includes('id="adminLink"'));
 assert.equal(context.doGet({ parameter: { admin: '1' } }).file, 'Admin');
 assert.equal(context.doGet({ parameter: {} }).file, 'Index');
 account = 'other@gmail.com';

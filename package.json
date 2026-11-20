@@ -4,7 +4,7 @@
   "private": true,
   "description": "Google Apps Script free-period calendar with offline regression tests",
   "scripts": {
-    "test": "node tests/calendar.test.cjs && node --test tests/deploy.test.cjs && node tests/concurrent-users.test.cjs && node tests/dashboard-compatibility.test.cjs && node tests/html-routing.test.cjs"
+    "test": "node tests/calendar.test.cjs && node --test tests/deploy.test.cjs && node tests/concurrent-users.test.cjs && node tests/dashboard-compatibility.test.cjs && node tests/html-routing.test.cjs && node tests/admin-privacy.test.cjs"
   },
   "engines": {
     "node": ">=22"

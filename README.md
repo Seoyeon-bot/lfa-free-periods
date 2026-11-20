@@ -1,43 +1,36 @@
-# LFA Free Periods
+# LFA Free Periods — private admin reporting
 
-The HTML is now separate from the calendar code. This version keeps the dashboard-only reporting and the teacher's completion email.
+Only the Google account seoyeon.choi@lfanet.org is allowed to see the admin link or use the admin page and data endpoint. The server checks the signed-in account before rendering the link. An email typed into the form is not used for admin authorization.
 
-## Where the code is
+## Install
 
-- src/Code.gs: reads calendars, calculates free periods, saves progress, sends the teacher's confirmation, and reports status for the admin table.
-- src/Index.html: the teacher's page, including its styles and browser JavaScript.
-- src/Admin.html: the admin table, including its styles and browser JavaScript.
-- src/appsscript.json: the existing Apps Script configuration and permissions.
-- tests: offline tests. These do not contact Google or change a teacher's real calendar.
-- scripts: the existing deployment helper, formatted for readability.
+Copy src, tests, scripts, docs, package.json and README.md into your existing repository, replacing matching files. Keep your existing GitHub workflow and secrets. Update Code.gs, Index.html and Admin.html together.
 
-The code uses indentation, separate statements, and short comments. The page layout, text, calendar rules, batch limits, saved progress, trigger behavior, and email behavior match the previous dashboard version. The only backend UI change is loading Index.html with createHtmlOutputFromFile instead of keeping the page inside WEB_HTML.
-
-## Update your existing repository
-
-Copy src, tests, scripts, docs, package.json and README.md into your existing lfa-free-periods repository. Replace the matching files and keep your existing GitHub workflow and deployment secrets.
-
-Run these commands from your repository folder:
+From the repository folder:
 
 ```bash
 npm test
 git add src tests scripts docs package.json README.md
-git commit -m "Separate HTML and format calendar code"
+git commit -m "Restrict admin rendering and remove private calendar diagnostics"
 git push origin main
 ```
 
-With your existing deployment variable enabled, the GitHub workflow tests and deploys the update. Wait for deployment success before opening the web app. Index.html and Admin.html both need to be present in src.
+Wait for the GitHub test and deployment jobs to succeed, then close/reopen the app page. The new server-rendered Index.html must be deployed with the matching Code.gs. Other accounts do not receive the admin link markup, and direct requests to admin endpoints are rejected. Existing browser tabs can show their previously loaded page until reopened.
 
-## Checks included
+## Admin reports
 
-- Compare the calendar helpers and reconciliation/checkpoints with the earlier GitHub source.
-- Compare all non-page backend logic with the dashboard version before formatting, ignoring comments and formatting.
-- Compare the browser JavaScript before and after moving the page into Index.html.
-- Check normal and admin page loading, and deny admin-page access to other accounts.
-- Run the existing calendar, email, retry, permissions, batching, holiday-gap and saved-progress upgrade tests.
-- Compare output for 50 simulated teacher accounts, including when dashboard storage fails.
-- Run the existing 50-worker concurrency simulation.
+The table keeps the LFA account email, setup request time, completion time, current stage, progress counts, last successful check, general error category/code/time, and short technical activity history. It does not include source calendar names or IDs, source event counts, event titles, meeting descriptions, attendees, or skipped-date details. Stages containing calendar names are replaced with a general availability-check stage. The last error message is chosen from a fixed list rather than copied from a Google error.
 
-The small Acorn parser under tests/vendor supports code comparisons and is included with its license. It and the historical fixtures stay outside src and are not uploaded to Apps Script. No additional npm install step is needed to run these tests.
+A later successful check is shown after an earlier issue, when recorded. A missing heartbeat is an investigation flag, not proof of an exact stop time or reason.
 
-Tests use fake Google services. They do not verify live Google API timing, quotas, permissions or email delivery. This readability cleanup does not fix the separately reported "Unable to talk to trigger service" error; trigger handling has been kept unchanged.
+Older shared monitoring records are filtered before being returned and rewritten without the removed details when possible. This happens on admin dashboard reads and on each account's next reporting write. It does not delete historical emails or Google execution logs. User-specific diagnostic data remains available to that user in their own page.
+
+## Emails
+
+The application source under src has no developer email recipient and no Gmail or misspelled Gmial address. Its only MailApp.sendEmail call sends the authenticated LFA teacher their setup-completion email. There is no CC or BCC. Historical source fixtures under tests contain the earlier version only for offline comparison; these are not deployed and their tests use fake MailApp services.
+
+## Verification
+
+Run npm test for the existing calendar, dashboard, HTML-routing and compatibility checks, plus admin-privacy.test.cjs. Tests verify server-rendered link omission for other teachers, endpoint access denial, removal of private fields from older/new reports, preservation of useful times and technical causes, and the remaining email recipient. Existing population comparisons cover 50 simulated teachers and a 50-worker simulation.
+
+Calendar calculation, event writes, batch limits, saved progress, teacher completion emails and trigger management are unchanged. Admin reporting, privacy filtering and page rendering are the intended changes. Live Google permissions, timing, quotas, and the previously reported trigger-service error are not guaranteed by offline tests.

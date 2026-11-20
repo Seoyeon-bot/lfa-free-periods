@@ -71,14 +71,18 @@ const MARKER = 'LFA_FREE_PERIODS_V1';
 
 // Open the regular page, or the admin page when the URL asks for it.
 function doGet(e) {
-  identity_();
+  const email = identity_();
   if (e && e.parameter && e.parameter.admin === '1') {
     admin_();
     return HtmlService.createHtmlOutputFromFile('Admin')
       .setTitle('LFA · Admin diagnostics')
       .addMetaTag('viewport', 'width=device-width, initial-scale=1');
   }
-  return HtmlService.createHtmlOutputFromFile('Index')
+  // Only this authenticated account gets admin markup in its page.
+  const page = HtmlService.createTemplateFromFile('Index');
+  page.isAdmin = SCHOOL.adminEmails.includes(email);
+  return page
+    .evaluate()
     .setTitle('LFA · Free Periods')
     .addMetaTag('viewport', 'width=device-width, initial-scale=1');
 }
@@ -1361,7 +1365,7 @@ function monitor_(state, stage, error, skipped) {
       shared = PropertiesService.getScriptProperties();
     const key = 'MONITOR_V1_' + email,
       now = new Date().toISOString();
-    const old = JSON.parse(shared.getProperty(key) || '{}');
+    const old = safeMonitorRecord_(JSON.parse(shared.getProperty(key) || '{}'));
     const parse = (k) => {
       try {
         return JSON.parse(p.getProperty(k) || 'null');
@@ -1392,11 +1396,12 @@ function monitor_(state, stage, error, skipped) {
       enabled: p.getProperty('ENABLED') === 'yes',
       lastSuccessfulCheck: p.getProperty('LAST_SYNC'),
       lastFullScan: p.getProperty('LAST_FULL_SYNC'),
-      setupKey: setupKey,
+      setupPeriod: academic.start + '/' + academic.end,
       setupCompleted: completed,
       setupCompletedAt: p.getProperty('LAST_FULL_SYNC'),
       initialCompletionAt: completed
-        ? (old.setupKey === setupKey && old.initialCompletionAt) ||
+        ? (old.setupPeriod === academic.start + '/' + academic.end &&
+            old.initialCompletionAt) ||
           p.getProperty('LAST_FULL_SYNC')
         : null,
       calculatedFullYear: Number(p.getProperty('FULL_FREE_COUNT') || 0),
@@ -1408,11 +1413,6 @@ function monitor_(state, stage, error, skipped) {
         (d ? { start: d.start, end: d.end } : null),
       pending: d ? d.pending : null,
       planned: d ? d.planned : null,
-      sources: d
-        ? (d.sources || [])
-            .slice(0, 16)
-            .map((c) => ({ name: c.name.slice(0, 60), events: c.events }))
-        : [],
       seconds: d ? d.seconds : null,
       retryAt: p.getProperty('NEXT_SYNC_AFTER'),
       confirmationEmail: p.getProperty('NOTIFICATION_ERROR')
@@ -1420,10 +1420,6 @@ function monitor_(state, stage, error, skipped) {
         : p.getProperty('NOTIFIED_SETUP')
           ? 'Send accepted by Google (delivery unverified)'
           : 'Not sent yet',
-      skippedSample:
-        skipped && skipped.length
-          ? skipped.slice(0, 10)
-          : old.skippedSample || [],
       lastIssue: old.lastIssue || null,
       history: old.history || []
     };
@@ -1431,7 +1427,14 @@ function monitor_(state, stage, error, skipped) {
       record.lastIssue = {
         at: now,
         stage: stage,
-        category: state === 'stalled' ? 'work_budget' : issue.category,
+        category:
+          state === 'stalled'
+            ? 'work_budget'
+            : /unable to talk to trigger service/i.test(
+                  String((error && (error.message || error)) || '')
+                )
+              ? 'trigger_service'
+              : issue.category,
         message:
           state === 'stalled'
             ? 'Read/calculation work used the work budget; pending calendar changes were not written.'
@@ -1450,14 +1453,12 @@ function monitor_(state, stage, error, skipped) {
     }
     // ASCII encoding makes the byte cap deterministic even for Unicode names.
     const encode = () =>
-      JSON.stringify(record).replace(
+      JSON.stringify(safeMonitorRecord_(record)).replace(
         /[\u007f-\uffff]/g,
         (c) => '\\u' + ('0000' + c.charCodeAt(0).toString(16)).slice(-4)
       );
     let json = encode();
     if (json.length > 6500) {
-      record.sources = [];
-      record.skippedSample = [];
       record.history = record.history.slice(0, 3);
       json = encode();
     }
@@ -1476,14 +1477,22 @@ function monitor_(state, stage, error, skipped) {
 // Read the saved account reports for the admin table.
 function getAdminStatus() {
   admin_();
-  const all = PropertiesService.getScriptProperties().getProperties(),
+  const shared = PropertiesService.getScriptProperties();
+  const all = shared.getProperties(),
     now = Date.now();
   const users = [];
   Object.keys(all)
     .filter((k) => k.startsWith('MONITOR_V1_'))
     .forEach((key) => {
       try {
-        const row = JSON.parse(all[key]);
+        const row = safeMonitorRecord_(JSON.parse(all[key]));
+        // Clean old shared reports too, including accounts that have stopped running.
+        const safeJSON = JSON.stringify(row);
+        if (safeJSON !== all[key]) {
+          try {
+            shared.setProperty(key, safeJSON);
+          } catch (ignore) {}
+        }
         row.ageMinutes = Math.max(
           0,
           Math.floor((now - Date.parse(row.updatedAt)) / 60000)
@@ -1511,4 +1520,137 @@ function getAdminStatus() {
       a.email.localeCompare(b.email)
   );
   return { generatedAt: new Date(now).toISOString(), users: users };
+}
+
+// Keep only technical status fields. Never return source calendar names or IDs.
+function safeMonitorRecord_(raw) {
+  const stamp = (value) =>
+    typeof value === 'string' &&
+    /^\d{4}-\d{2}-\d{2}T[0-9:.]+Z$/.test(value) &&
+    Number.isFinite(Date.parse(value))
+      ? value
+      : null;
+  const count = (value) =>
+    Number.isFinite(Number(value)) && value !== null && value !== undefined
+      ? Math.max(0, Number(value))
+      : null;
+  const state = (value) =>
+    [
+      'requested',
+      'running',
+      'retrying',
+      'in_progress',
+      'idle',
+      'stalled',
+      'error',
+      'paused'
+    ].includes(value)
+      ? value
+      : 'unknown';
+  const stage = (value) => {
+    const text = String(value || '');
+    if (/^Reading calendar:|^Reading personal/.test(text))
+      return 'Checking availability';
+    const stages = [
+      'Setup requested',
+      'Activation / initial update',
+      'Preparing calendars',
+      'Reading letter-day calendar',
+      'Calculating free periods',
+      'Reading generated calendar',
+      'Writing free-period changes',
+      'Finished current date range',
+      'Waiting for scheduled retry',
+      'Automatic updates paused',
+      'Checking account'
+    ];
+    return stages.includes(text) ? text : 'Processing update';
+  };
+  const causes = {
+    access:
+      'Access or authorization needs attention. Ask the user to review permissions.',
+    missing_calendar:
+      'A required calendar is unavailable. Ask the user to review their calendar access.',
+    rate_limit:
+      'Google temporarily limited requests. A later attempt may succeed.',
+    temporary_service: 'A Google service was temporarily unavailable.',
+    trigger_service: 'The background-trigger service could not be reached.',
+    work_budget:
+      'The work budget was used before pending changes could be written.',
+    update_failure:
+      'The update stopped with an unclassified error. Check Apps Script Executions.'
+  };
+  let issue = null;
+  if (raw.lastIssue) {
+    const value = raw.lastIssue,
+      category = Object.prototype.hasOwnProperty.call(causes, value.category)
+        ? value.category
+        : 'update_failure';
+    issue = {
+      at: stamp(value.at),
+      stage: stage(value.stage),
+      category: category,
+      message: causes[category],
+      code: /^(400|401|403|404|409|429|500|502|503|504)$/.test(
+        String(value.code)
+      )
+        ? String(value.code)
+        : null
+    };
+  }
+  const period = String(raw.setupPeriod || raw.setupKey || '')
+    .split('/')
+    .slice(0, 2)
+    .join('/');
+  const date = (value) =>
+    typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)
+      ? value
+      : null;
+  const mail = [
+    'Delayed; automatic retry',
+    'Send accepted by Google (delivery unverified)',
+    'Not sent yet'
+  ];
+  return {
+    email:
+      typeof raw.email === 'string' && /^[^\s@]+@lfanet\.org$/.test(raw.email)
+        ? raw.email
+        : 'Unknown account',
+    firstSeen: stamp(raw.firstSeen),
+    updatedAt: stamp(raw.updatedAt),
+    requestedAt: stamp(raw.requestedAt),
+    state: state(raw.state),
+    stage: stage(raw.stage),
+    enabled: raw.enabled === true,
+    lastSuccessfulCheck: stamp(raw.lastSuccessfulCheck),
+    lastFullScan: stamp(raw.lastFullScan),
+    setupPeriod: /^\d{4}-\d{2}-\d{2}\/\d{4}-\d{2}-\d{2}$/.test(period)
+      ? period
+      : null,
+    setupCompleted: raw.setupCompleted === true,
+    setupCompletedAt: stamp(raw.setupCompletedAt),
+    initialCompletionAt: stamp(raw.initialCompletionAt),
+    calculatedFullYear: count(raw.calculatedFullYear),
+    skippedFullYear: count(raw.skippedFullYear),
+    completedRanges: count(raw.completedRanges),
+    totalRanges: count(raw.totalRanges),
+    currentRange: raw.currentRange
+      ? { start: date(raw.currentRange.start), end: date(raw.currentRange.end) }
+      : null,
+    pending: count(raw.pending),
+    planned: count(raw.planned),
+    seconds: count(raw.seconds),
+    retryAt: count(raw.retryAt),
+    confirmationEmail: mail.includes(raw.confirmationEmail)
+      ? raw.confirmationEmail
+      : 'Not sent yet',
+    lastIssue: issue,
+    history: (Array.isArray(raw.history) ? raw.history : [])
+      .slice(0, 6)
+      .map((item) => ({
+        at: stamp(item.at),
+        state: state(item.state),
+        stage: stage(item.stage)
+      }))
+  };
 }

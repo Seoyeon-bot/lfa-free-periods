@@ -495,15 +495,13 @@ test('Nearby reconciliation removes a booked block without touching farther-out 
   calendars.set(user, []);
   call('syncFreePeriods()');
   const id = storeFor(user).getProperty('OUTPUT_CALENDAR_ID');
-  calendars
-    .get(id)
-    .push({
-      id: 'far-away',
-      summary: 'Free Period A1',
-      start: { dateTime: '2027-05-10T08:10:00-05:00' },
-      end: { dateTime: '2027-05-10T08:55:00-05:00' },
-      description: 'LFA_FREE_PERIODS_V1\n2027-05-10/1'
-    });
+  calendars.get(id).push({
+    id: 'far-away',
+    summary: 'Free Period A1',
+    start: { dateTime: '2027-05-10T08:10:00-05:00' },
+    end: { dateTime: '2027-05-10T08:55:00-05:00' },
+    description: 'LFA_FREE_PERIODS_V1\n2027-05-10/1'
+  });
   call(
     `syncWindow_=function(){return {window:{start:'${date}',end:'${next}'},nearby:true};}`
   );
@@ -766,7 +764,7 @@ test('Skipped dates remain visible with completion and do not produce developer 
   call('syncFreePeriods()');
   const row = JSON.parse(sharedProps['MONITOR_V1_' + user]);
   assert.equal(row.skippedFullYear, 1);
-  assert.ok(row.skippedSample.length);
+  assert.equal(row.skippedSample, undefined);
   assert.equal(sentMail.length, before);
 });
 test('Full-year date ranges cover the year exactly once and prioritize upcoming dates', () => {
@@ -994,7 +992,7 @@ test('Requested, paused, work-budget and skipped-date diagnostics are distinct',
   );
   let row = JSON.parse(sharedProps['MONITOR_V1_' + user]);
   assert.equal(row.lastIssue.category, 'work_budget');
-  assert.equal(row.skippedSample.length, 1);
+  assert.equal(row.skippedSample, undefined);
   call("monitor_('paused','Paused')");
   assert.equal(JSON.parse(sharedProps['MONITOR_V1_' + user]).state, 'paused');
 });
