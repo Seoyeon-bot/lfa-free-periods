@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <base target="_top" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <style>
+      body {
+        font: 15px/1.5 system-ui;
+        margin: 0;
+        background: #f5f5f5;
+        color: #191919;
+      }
+      main {
+        max-width: 1400px;
+        margin: auto;
+        padding: 28px;
+      }
+      h1 {
+        margin-bottom: 8px;
+      }
+      button,
+      input,
+      select {
+        font: inherit;
+        padding: 9px;
+        border: 1px solid #bbb;
+        border-radius: 6px;
+      }
+      button {
+        background: #e57200;
+        cursor: pointer;
+      }
+      nav {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+        margin: 20px 0;
+      }
+      .wrap {
+        overflow: auto;
+        background: white;
+        border-top: 5px solid #e57200;
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        min-width: 950px;
+      }
+      th,
+      td {
+        text-align: left;
+        vertical-align: top;
+        padding: 12px;
+        border-bottom: 1px solid #ddd;
+      }
+      th {
+        background: #fff1e4;
+      }
+      .attention {
+        background: #fff5e9;
+      }
+      small {
+        display: block;
+        color: #555;
+      }
+      pre {
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        font: 13px/1.5 system-ui;
+        max-width: 620px;
+      }
+      summary {
+        cursor: pointer;
+      }
+      #message {
+        min-height: 24px;
+      }
+      p {
+        max-width: 1050px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>LFA Free Periods · Admin diagnostics</h1>
+      <p>
+        Processing status for each signed-in account. “Full-year pass completed”
+        means all date ranges were processed, including any skipped dates; it
+        does not verify that every expected free period is correct. No event
+        titles are recorded.
+      </p>
+      <nav>
+        <input
+          id="search"
+          aria-label="Search teacher email"
+          placeholder="Search teacher email"
+        /><select id="filter" aria-label="Status filter">
+          <option value="all">All accounts</option>
+          <option value="attention">Needs attention</option>
+          <option value="unfinished">Initial setup unfinished</option>
+          <option value="complete">Full-year pass completed</option></select
+        ><button id="refresh">Refresh</button>
+      </nav>
+      <div id="message" role="status" aria-live="polite">Loading…</div>
+      <div class="wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Teacher / account</th>
+              <th>Setup start time</th>
+              <th>Completion time</th>
+              <th>Current status</th>
+              <th>Progress</th>
+              <th>Latest issue / diagnostics</th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+      <p>
+        Refreshes every 60 seconds while this page is open. Existing accounts
+        appear after their next successful reporting call. Failures before the
+        script starts cannot be captured here; a missing heartbeat needs
+        investigation in Apps Script Executions. Earlier errors cannot be
+        reconstructed.
+      </p>
+    </main>
+    <script>
+      let users = [],
+        loading = false;
+      const el = (id) => document.getElementById(id);
+      const when = (value) =>
+        value
+          ? new Date(value).toLocaleString('en-US', {
+              timeZone: 'America/Chicago'
+            }) + ' Central'
+          : '—';
+      function add(parent, tag, text) {
+        const node = document.createElement(tag);
+        node.textContent = text;
+        parent.appendChild(node);
+        return node;
+      }
+      function render() {
+        el('rows').replaceChildren();
+        const q = el('search').value.toLowerCase(),
+          filter = el('filter').value;
+        const selected = users.filter(
+          (u) =>
+            u.email.toLowerCase().includes(q) &&
+            (filter === 'all' ||
+              (filter === 'attention' && u.attention) ||
+              (filter === 'unfinished' && !u.setupCompleted) ||
+              (filter === 'complete' && u.setupCompleted))
+        );
+        selected.forEach((u) => {
+          const tr = document.createElement('tr');
+          if (u.attention) tr.className = 'attention';
+          el('rows').appendChild(tr);
+          const who = add(tr, 'td', '');
+          add(who, 'strong', u.email);
+          add(who, 'small', 'Account email identifies the teacher');
+          add(tr, 'td', when(u.requestedAt));
+          const completed = add(
+            tr,
+            'td',
+            u.setupCompleted
+              ? when(u.initialCompletionAt || u.setupCompletedAt)
+              : 'Not completed yet'
+          );
+          if (u.setupCompleted)
+            add(
+              completed,
+              'small',
+              'Full-year pass completed; review skipped dates'
+            );
+          const state = add(tr, 'td', '');
+          add(state, 'strong', u.displayState);
+          add(state, 'div', u.stage);
+          add(state, 'small', 'Last report: ' + when(u.updatedAt));
+          add(
+            state,
+            'small',
+            'Last successful check: ' + when(u.lastSuccessfulCheck)
+          );
+          if (u.retryAt)
+            add(state, 'small', 'Retry after: ' + when(Number(u.retryAt)));
+          const progress = add(tr, 'td', '');
+          add(
+            progress,
+            'strong',
+            u.setupCompleted
+              ? 'Full-year pass completed'
+              : 'Initial setup unfinished'
+          );
+          add(progress, 'div', 'Latest full pass: ' + when(u.setupCompletedAt));
+          if (u.totalRanges)
+            add(
+              progress,
+              'div',
+              'Current scan: ' +
+                u.completedRanges +
+                '/' +
+                u.totalRanges +
+                ' ranges complete'
+            );
+          if (u.currentRange)
+            add(
+              progress,
+              'div',
+              'Range: ' +
+                u.currentRange.start +
+                ' through ' +
+                u.currentRange.end +
+                ' (end excluded)'
+            );
+          add(
+            progress,
+            'div',
+            'Last batch pending changes: ' +
+              (u.pending === null ? 'Unknown' : u.pending)
+          );
+          add(
+            progress,
+            'div',
+            'Latest full pass: ' +
+              u.calculatedFullYear +
+              ' blocks calculated; ' +
+              u.skippedFullYear +
+              ' dates skipped'
+          );
+          add(progress, 'small', 'Confirmation email: ' + u.confirmationEmail);
+          const detail = add(tr, 'td', '');
+          if (u.lastIssue) {
+            add(
+              detail,
+              'strong',
+              'Last recorded issue: ' + u.lastIssue.category
+            );
+            add(detail, 'div', u.lastIssue.message);
+            add(
+              detail,
+              'small',
+              when(u.lastIssue.at) +
+                ' · ' +
+                u.lastIssue.stage +
+                (u.lastIssue.code ? ' · HTTP ' + u.lastIssue.code : '')
+            );
+          } else add(detail, 'div', 'No issue recorded');
+          const details = add(detail, 'details', '');
+          add(details, 'summary', 'View diagnostics and recent activity');
+          const lines = [
+            'Last completed batch duration: ' +
+              (u.seconds === null ? 'Unknown' : u.seconds + ' seconds'),
+            'Last completed batch planned blocks: ' + u.planned,
+            'Source calendars from last completed batch:'
+          ];
+          (u.sources || []).forEach((c) =>
+            lines.push(c.name + ': ' + c.events + ' events')
+          );
+          lines.push(
+            'Recent skipped-date sample (may be from an earlier range):'
+          );
+          (u.skippedSample || []).forEach((s) => lines.push(s));
+          lines.push('Recent activity:');
+          (u.history || []).forEach((h) =>
+            lines.push(when(h.at) + ' · ' + h.state + ' · ' + h.stage)
+          );
+          add(details, 'pre', lines.join('\n'));
+        });
+        if (!selected.length) {
+          const tr = add(el('rows'), 'tr', '');
+          const td = add(tr, 'td', 'No matching accounts yet.');
+          td.colSpan = 6;
+        }
+      }
+      function refresh() {
+        if (loading) return;
+        loading = true;
+        el('refresh').disabled = true;
+        google.script.run
+          .withSuccessHandler((r) => {
+            users = r.users;
+            render();
+            el('message').textContent =
+              users.length +
+              ' accounts · ' +
+              users.filter((u) => u.attention).length +
+              ' need attention · Updated ' +
+              when(r.generatedAt);
+            loading = false;
+            el('refresh').disabled = false;
+          })
+          .withFailureHandler((e) => {
+            el('message').textContent =
+              e.message || 'Unable to load admin diagnostics.';
+            loading = false;
+            el('refresh').disabled = false;
+          })
+          .getAdminStatus();
+      }
+      el('search').addEventListener('input', render);
+      el('filter').addEventListener('change', render);
+      el('refresh').addEventListener('click', refresh);
+      refresh();
+      setInterval(refresh, 60000);
+    </script>
+  </body>
+</html>

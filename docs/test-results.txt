@@ -1,0 +1,91 @@
+
+> lfa-free-periods@1.0.0 test
+> node tests/calendar.test.cjs && node --test tests/deploy.test.cjs && node tests/concurrent-users.test.cjs && node tests/dashboard-compatibility.test.cjs && node tests/html-routing.test.cjs
+
+PASS Coworker A authorizes and gets a private output calendar
+PASS Coworker B gets a separate output and different availability
+PASS Typing another teacher email cannot impersonate them
+PASS Deployment running as owner for a different visitor is rejected
+PASS Admin F to G change updates labels/times and deletes F7/F8
+PASS G-day recalculation uses teacher B class overlap at the new times
+PASS New meeting removes G5 only for the booked teacher
+PASS Deleting the meeting restores the free period
+PASS Repeated sync is idempotent: no duplicates or unnecessary writes
+PASS Conflicting F and G markers remove misleading free blocks
+PASS Missing letter marker produces no guessed free blocks
+PASS School source events are never modified by the app
+PASS Calendar link targets the signed-in LFA account without subscription prompt
+PASS August-May school year rolls over in June without assuming letter rotation
+PASS All A-G schedules, Tuesday exceptions and late starts match planner rules
+PASS Any partial overlap blocks the whole period; adjacent event does not
+PASS Hidden calendars are excluded and primary calendar always included
+PASS Run limit resumes without duplicating previously inserted blocks
+PASS Completion email is delivered only to each authenticated user
+PASS Rechecking or activating again does not repeat the completion email
+PASS No completion email during a partial batch; exactly one after final batch
+PASS Mail failure does not undo calendar completion; next successful run retries
+PASS Exhausted mail quota delays email without failing calendar sync
+PASS Completion email discloses skipped dates instead of claiming full coverage
+PASS Saved status survives reopening and notifications never cross users
+PASS After initial full-year completion, nearby check covers today plus 35 days
+PASS Incomplete initial setup and changed school year still use annual window
+PASS Stale full-year pass runs again, so farther-out changes are not ignored
+PASS Nearby reconciliation removes a booked block without touching farther-out blocks
+PASS Missing shared school calendar is subscribed by exact ID and selected
+PASS Existing calendar with a personal name is reused without duplicates
+PASS Unchecked or hidden school calendar is made visible without changing name
+PASS A subscription race reuses the calendar after an Already Exists response
+PASS Missing sharing permissions stop activation before free-period writes
+PASS Busy-only school access is rejected because letter-day titles are unavailable
+PASS Annotated B/G titles, including suffix typos, retain their letter
+PASS Annotated A-G markers produce the same actual free blocks as plain titles
+PASS Tuesday annotations preserve Tuesday timing and G-day late start
+PASS Unrelated titles and ambiguous mixed-letter titles are not guessed
+PASS Renaming a marker to include a note does not delete valid free periods
+PASS Setup does not send diagnostic emails to a developer
+PASS Background failures are logged in the dashboard without sending email
+PASS Completion keeps teacher confirmation email and records completion time without developer mail
+PASS Skipped dates remain visible with completion and do not produce developer mail
+PASS Full-year date ranges cover the year exactly once and prioritize upcoming dates
+PASS Completed chunks advance checkpoints; completion notification waits for last range
+PASS Quota failure preserves checkpoint and backs off without more API reads
+PASS Temporary Google failure saves progress and prevents immediate API retries
+PASS Rate-limit 403 is retryable while sharing 403 requires attention
+PASS Manual refresh gives a clear permission message without raw API details
+PASS Successful retry clears stale issue status
+
+51 tests passed. Mocks only; live triggers/deployment and email delivery were not tested.
+PASS Teachers cannot read the dashboard or admin URL
+PASS Admin sees separate accounts populated by real synchronization
+PASS Failed sync records safe cause; successful retry retains last failure
+PASS Old running heartbeat is flagged without inventing timeout cause
+PASS Dashboard storage failure never stops calendar synchronization
+PASS Requested, paused, work-budget and skipped-date diagnostics are distinct
+PASS Bounded Unicode diagnostics stay under one property value limit
+PASS 7 admin monitoring checks (including server-side authorization and reporting failure isolation).
+PASS Fifty account reports keep distinct shared keys and cannot choose another identity
+PASS 8 admin monitoring checks total.
+✔ deployment requires all three configuration secrets (0.915958ms)
+✔ bad credentials fail with a generic message without exposing their value (0.178583ms)
+✔ URL pasted instead of Script ID or deployment ID is rejected (0.300584ms)
+✔ deployment includes only src and credentials are private temporary files (2.598375ms)
+✔ failed validation writes no credential files (0.962917ms)
+✔ workflow deployment depends on passing tests and is restricted to main (0.492667ms)
+ℹ tests 6
+ℹ suites 0
+ℹ pass 6
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 81.35275
+PASS 50 concurrent simulated teachers: isolated output, correct busy periods, no cross-account writes.
+Simulation completed in 0.7s. This is NOT a Google API latency, quota, email, or deployment benchmark.
+PASS 36 production helpers, population configuration, calendar writes and checkpoint logic match the pre-dashboard version.
+PASS 50 teacher schedules match old population, batch completion, meeting removal/restoration, day changes and confirmation emails; dashboard unavailable=false.
+PASS 50 teacher schedules match old population, batch completion, meeting removal/restoration, day changes and confirmation emails; dashboard unavailable=true.
+PASS Both versions finish December–January backfill across the no-letter-day holiday gap.
+PASS Switching versions during partial setup resumes existing progress without duplicate blocks and sends one teacher completion email.
+PASS All backend logic outside the HTML loader matches the dashboard version before formatting.
+PASS Index.html keeps the same browser JavaScript and server calls.
+PASS Normal users load Index.html; only the approved admin can load Admin.html; non-LFA users are rejected.

@@ -1,6 +1,8 @@
-# Portfolio project: test, then automatically deploy
+# Portfolio project: test, then optionally deploy
 
-The pipeline is: commit or PR > Node 22 and 24 tests > passing main commit > push source > create a version and update the existing Apps Script deployment. Failed tests stop the deploy job. Pull requests never receive deployment secrets or deploy. GitHub Pages is not used.
+Testing needs no Google credentials. Deployment is skipped unless the repository Actions variable `ENABLE_APPS_SCRIPT_DEPLOY` is set to `true`.
+
+The optional deployment pipeline is: commit or PR > Node 22 and 24 tests > passing main commit > push source > create a version and update the existing Apps Script deployment. Failed tests stop the deploy job. Pull requests never receive deployment secrets or deploy. GitHub Pages is not used.
 
 ## 1. Publish the source
 
@@ -9,6 +11,8 @@ Create a GitHub repository named `lfa-free-periods`. Choose Public if you want t
 Extract the ZIP and upload the contents of `lfa-free-periods` at the repository root. Include `.github/workflows/tests.yml`, `src`, `tests`, `scripts`, `docs`, `package.json`, README and `.gitignore`. Uploading the ZIP alone does not enable Actions. On Mac, Command-Shift-period reveals dotfiles in Finder. Alternatively create `.github/workflows/tests.yml` through GitHub's Add file > Create new file and paste the supplied workflow.
 
 Use `main` as the default branch. If your branch is named `master`, rename it to `main` or deliberately update the workflow's branch condition and latest-commit check together.
+
+For testing only, stop here: open **Actions > Test and deploy > Run workflow**. See [GITHUB-TESTING.md](GITHUB-TESTING.md). The remaining steps enable optional deployment.
 
 ## 2. Enable Google's Apps Script API
 
@@ -53,6 +57,8 @@ The workflow creates a `production` GitHub environment. You may create it first 
 
 Keep Google credential files out of git; the provided `.gitignore` excludes them. A public repository can run the workflow while keeping Actions secrets private. Only trusted changes should enter main, because main deploys with your authorization.
 
+After adding the three secrets, go to **Settings > Secrets and variables > Actions > Variables**, and add `ENABLE_APPS_SCRIPT_DEPLOY` with value `true`. Only then can deployment run.
+
 ## 5. Run the pipeline
 
 Go to **Actions > Test and deploy > Run workflow**, select `main`, then Run. Both Node test jobs must pass before the deploy job starts. After setup, pushing/merging to main triggers the same pipeline automatically.
@@ -80,7 +86,7 @@ Automated deployment cannot silently authorize new Calendar/Mail scopes for cowo
 4. Merge the working PR. Main runs tests again, then deploys if they pass.
 5. Record the actual run URL, commit and resulting deployment version. Explain the failing test and fix; do not claim a green deployment before it happens.
 
-Suggested portfolio wording after actual verification: "Built an AI-assisted Google Apps Script scheduling app with per-user calendars, 58 automated checks, and a GitHub Actions pipeline that tests changes before updating an existing web-app deployment."
+Suggested portfolio wording after actual verification: "Built an AI-assisted Google Apps Script scheduling app with per-user calendars, 62 automated checks, and a GitHub Actions pipeline that tests changes before updating an existing web-app deployment."
 
 ## Troubleshooting and rollback
 
@@ -98,4 +104,4 @@ Suggested portfolio wording after actual verification: "Built an AI-assisted Goo
 - https://github.com/google/clasp (commands and authentication)
 - https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-jobs (job dependencies)
 
-Pipeline configuration and 35 tests were verified locally on November 14, 2026. A real GitHub Actions deployment has not been executed by this package's authoring session; it requires your repository and Google authorization.
+The current 62 checks passed locally on November 17, 2026. A real GitHub Actions deployment has not been executed by this package's authoring session; it requires your repository and Google authorization.

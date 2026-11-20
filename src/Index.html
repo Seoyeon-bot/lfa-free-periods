@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <base target="_top" />
+    <!-- Page layout and colors. -->
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 24px;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background: #111111;
+        color: #111111;
+        font:
+          16px/1.5 system-ui,
+          sans-serif;
+      }
+      .card {
+        width: 100%;
+        max-width: 450px;
+        padding: 32px;
+        background: #fff;
+        border: 1px solid #dddddd;
+        border-top: 7px solid #e57200;
+        border-radius: 18px;
+      }
+      h1 {
+        font:
+          400 38px/1.12 Georgia,
+          serif;
+        margin: 16px 0;
+      }
+      p {
+        color: #5c5c5c;
+        font-size: 14px;
+      }
+      .brand {
+        font-size: 12px;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+      }
+      label {
+        display: block;
+        font-weight: 650;
+        margin: 22px 0 7px;
+      }
+      input {
+        width: 100%;
+        padding: 12px;
+        border: 1px solid #bfbfbf;
+        border-radius: 8px;
+        font: inherit;
+      }
+      button {
+        width: 100%;
+        padding: 14px;
+        border: 0;
+        border-radius: 8px;
+        background: #e57200;
+        color: #111111;
+        font: 600 15px system-ui;
+        margin-top: 16px;
+        cursor: pointer;
+      }
+      button:disabled {
+        opacity: 0.55;
+        cursor: wait;
+      }
+      .status {
+        padding: 12px;
+        border-radius: 8px;
+        background: #fff3e8;
+        font-size: 14px;
+        margin-top: 16px;
+        white-space: pre-wrap;
+      }
+      .status:empty {
+        display: none;
+      }
+      .error {
+        background: #fff0e3;
+        color: #111111;
+        border-left: 4px solid #d55500;
+      }
+      .note {
+        font-size: 12px;
+      }
+      .link {
+        display: block;
+        text-align: center;
+        margin-top: 16px;
+        color: #111111;
+        font-weight: 650;
+      }
+      .hidden {
+        display: none;
+      }
+      input:focus,
+      button:focus-visible,
+      a:focus-visible {
+        outline: 3px solid #e57200;
+        outline-offset: 2px;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <div class="brand">Lake Forest Academy</div>
+      <h1>Your free periods,<br />automatically.</h1>
+      <p>
+        We check All LFA Events, your main calendar, and the calendars checked
+        in your Google Calendar view. We cover the August–May school year
+        wherever A–G day markers are published. Free periods appear in light
+        gray.
+      </p>
+      <p>
+        We automatically add the shared LFA letter-day calendar if it is
+        missing. Your LFA account must have permission to see its event details.
+      </p>
+      <p>
+        <strong>Start setup once, then let it run.</strong> Initial setup may
+        take 30 minutes to several hours, depending on your calendars and
+        Google's processing limits. You can close this page after setup is
+        enabled. Keep the same calendars checked in Google Calendar until you
+        receive the completion email; changing which calendars are checked can
+        change your calculated free periods. You do not need to click Update
+        repeatedly.
+      </p>
+      <form id="form">
+        <label for="email">Your LFA email</label>
+        <input
+          id="email"
+          type="email"
+          placeholder="you@lfanet.org"
+          autocomplete="email"
+          required
+          disabled
+        />
+        <button id="submit" type="submit" disabled>Add my free periods</button>
+      </form>
+      <div id="status" class="status" role="status" aria-live="polite">
+        Connecting your Google account…
+      </div>
+      <details style="margin-top: 16px; font-size: 12px">
+        <summary>Setup progress and diagnostics</summary>
+        <pre
+          id="diagnostics"
+          style="white-space: pre-wrap; overflow-wrap: anywhere"
+        >
+No completed check yet.</pre
+        >
+      </details>
+      <a id="adminLink" class="link hidden" target="_blank" rel="noopener"
+        >Admin diagnostics ↗</a
+      >
+      <p id="lastCheck" class="note"></p>
+      <a id="open" class="link hidden" target="_blank" rel="noopener"
+        >Open my calendar ↗</a
+      >
+      <p class="note">
+        Keep your class calendar checked in Google Calendar. Shared calendars
+        block time for all their bookings. Google authorization is required.
+        Changes refresh automatically; timing depends on Google.
+      </p>
+    </main>
+    <script>
+      // Update the page after the server returns this account’s status.
+      function el(id) {
+        return document.getElementById(id);
+      }
+      function message(text, error) {
+        el('status').textContent = text;
+        el('status').classList.toggle('error', !!error);
+      }
+      function link(url) {
+        if (url) {
+          el('open').href = url;
+          el('open').classList.remove('hidden');
+        }
+      }
+      function showDiagnostics(value, stage) {
+        let d;
+        try {
+          d = typeof value === 'string' ? JSON.parse(value) : value;
+        } catch (e) {}
+        const lines = stage ? ['Last recorded stage: ' + stage] : [];
+        if (d) {
+          lines.push(
+            'Date range: ' + d.start + ' to ' + d.end + ' (end excluded)',
+            'Calculated free blocks: ' + d.planned,
+            'Skipped dates: ' + d.skipped,
+            'Pending changes in this range: ' + d.pending,
+            'Date ranges completed: ' + d.completedRanges + '/' + d.totalRanges,
+            'Check duration: ' + d.seconds + ' seconds',
+            'Source calendars (events in this range):'
+          );
+          (d.sources || []).forEach((c) =>
+            lines.push(c.name + ': ' + c.events)
+          );
+        }
+        el('diagnostics').textContent =
+          lines.join('\n') || 'No completed check yet.';
+      }
+      function failure(e) {
+        el('submit').disabled = false;
+        el('open').classList.add('hidden');
+        message(e.message || String(e), true);
+      }
+      // Send setup requests to activate() in Code.gs.
+      el('form').addEventListener('submit', function (e) {
+        e.preventDefault();
+        el('submit').disabled = true;
+        message(
+          'Starting setup… After authorization and background updates are enabled, you can close this page. Initial setup may take 30 minutes to several hours. Keep the same calendars checked until you receive the completion email. You do not need to click Update repeatedly.'
+        );
+        google.script.run
+          .withSuccessHandler(function (r) {
+            el('submit').disabled = false;
+            el('submit').textContent = 'Update my free periods';
+            message(
+              r.message +
+                ((r.skipped || []).length
+                  ? ' Some dates need confirmed school schedule information.'
+                  : ''),
+              !!r.needsAttention
+            );
+            link(r.calendarUrl);
+            showDiagnostics(r.diagnostics);
+            if (r.lastSync)
+              el('lastCheck').textContent =
+                'Last successful update: ' +
+                new Date(r.lastSync).toLocaleString();
+          })
+          .withFailureHandler(failure)
+          .activate(el('email').value);
+      });
+      // Load saved progress when the teacher opens the page.
+      if (typeof google !== 'undefined' && google.script && google.script.run) {
+        google.script.run
+          .withSuccessHandler(function (s) {
+            if (s.isAdmin)
+              google.script.run
+                .withSuccessHandler(function (url) {
+                  el('adminLink').href = url;
+                  el('adminLink').classList.remove('hidden');
+                })
+                .getAdminUrl();
+            el('email').value = s.email;
+            el('email').disabled = false;
+            el('submit').disabled = false;
+            if (s.enabled) el('submit').textContent = 'Update my free periods';
+            message(
+              s.lastError
+                ? s.issue
+                  ? s.issue.message
+                  : 'Last update needs attention: ' + s.lastError
+                : (s.lastStatus || '') +
+                    (s.notificationError
+                      ? '\nConfirmation email is delayed; automatic checks will retry.'
+                      : ''),
+              !!s.lastError && !(s.issue && s.issue.retryable)
+            );
+            link(s.calendarUrl);
+            showDiagnostics(s.diagnostics, s.stage);
+            if (s.lastSync)
+              el('lastCheck').textContent =
+                'Last successful update: ' +
+                new Date(s.lastSync).toLocaleString();
+          })
+          .withFailureHandler(function (e) {
+            message(e.message || String(e), true);
+          })
+          .getSetup();
+      } else {
+        message(
+          'Preview only. Open the deployed Apps Script website to authorize your account.'
+        );
+      }
+    </script>
+  </body>
+</html>
